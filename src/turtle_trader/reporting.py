@@ -12,6 +12,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from .research import ADJUSTED_RESEARCH_WARNING, PriceBasis, validate_price_basis
+
 
 def _get(value: Any, name: str, default: Any = None) -> Any:
     return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
@@ -64,6 +66,38 @@ def _jsonable(value: Any) -> Any:
 def jsonable(value: object) -> Any:
     """Convert a result record or common research value to JSON-compatible data."""
     return _jsonable(value)
+
+
+def _run_result(value: Any) -> Any:
+    """Unwrap RunStore.load output while leaving ordinary result mappings alone."""
+    if isinstance(value, dict) and "run_id" in value and "result" in value:
+        return value["result"]
+    return value
+
+
+def _research_metadata(value: Any) -> tuple[PriceBasis, list[str]]:
+    source = _run_result(value)
+    bases: set[PriceBasis] = set()
+    warnings: list[str] = []
+    for container in (source, _get(source, "metadata", {}), _get(source, "manifest", {}),
+                      value, _get(value, "metadata", {}), _get(value, "config", {})):
+        raw_basis = _get(container, "price_basis")
+        if raw_basis is not None:
+            bases.add(validate_price_basis(raw_basis))
+        raw_warnings = _get(container, "research_warnings", [])
+        if not isinstance(raw_warnings, (list, tuple)) or any(
+            not isinstance(warning, str) for warning in raw_warnings
+        ):
+            raise ValueError("research_warnings must be a list of strings")
+        for warning in raw_warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+    if len(bases) > 1:
+        raise ValueError("conflicting price basis metadata")
+    basis = next(iter(bases)) if bases else "action_free"
+    if basis == "adjusted_research" and ADJUSTED_RESEARCH_WARNING not in warnings:
+        warnings.append(ADJUSTED_RESEARCH_WARNING)
+    return basis, warnings
 
 
 def _benchmark_return(benchmark: Iterable[Any], start: Any, end: Any) -> float | None:
@@ -133,6 +167,8 @@ def summarize_result(result: Any, benchmark: Iterable[Any] | None = None) -> dic
     divided by starting equity. Benchmark endpoints require exact timestamps;
     status reports whether they matched. Undefined ratios are ``None``.
     """
+    price_basis, warnings = _research_metadata(result)
+    result = _run_result(result)
     equity_points = list(_get(result, "equity", []) or [])
     fills = list(_get(result, "fills", []) or [])
     equities = [_number(_get(point, "equity")) for point in equity_points]
@@ -201,6 +237,8 @@ def summarize_result(result: Any, benchmark: Iterable[Any] | None = None) -> dic
         "benchmark_status": benchmark_status,
         "benchmark_excess_return": returns - benchmark_result
         if returns is not None and benchmark_result is not None else None,
+        "price_basis": price_basis,
+        "research_warnings": warnings,
     }
 
 
@@ -210,7 +248,13 @@ def export_report_json(
     """Write a self-contained JSON report and return its path."""
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"summary": summarize_result(result, benchmark), "result": _jsonable(result)}
+    price_basis, warnings = _research_metadata(result)
+    payload = {
+        "price_basis": price_basis,
+        "research_warnings": warnings,
+        "summary": summarize_result(result, benchmark),
+        "result": _jsonable(result),
+    }
     output.write_text(
         json.dumps(payload, allow_nan=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -219,14 +263,27 @@ def export_report_json(
 
 
 def export_report_csv(result: Any, path: str | Path) -> Path:
-    """Write one row per equity snapshot or fill, tagged by ``record_type``."""
+    """Write equity/fill rows and repeat research-basis labels on each row."""
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    source = _run_result(result)
+    price_basis, warnings = _research_metadata(result)
     rows: list[dict[str, Any]] = []
     for kind in ("equity", "fills"):
-        for item in _get(result, kind, []) or []:
+        for item in _get(source, kind, []) or []:
             row = _jsonable(item)
-            rows.append({"record_type": "fill" if kind == "fills" else "equity", **row})
+            rows.append({
+                "record_type": "fill" if kind == "fills" else "equity",
+                "price_basis": price_basis,
+                "research_warnings": json.dumps(warnings, separators=(",", ":")),
+                **row,
+            })
+    if not rows:
+        rows.append({
+            "record_type": "metadata",
+            "price_basis": price_basis,
+            "research_warnings": json.dumps(warnings, separators=(",", ":")),
+        })
     columns = sorted({key for row in rows for key in row} | {"record_type"})
     with output.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=sorted(columns), extrasaction="ignore")

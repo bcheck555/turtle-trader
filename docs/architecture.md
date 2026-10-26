@@ -2,7 +2,7 @@
 
 Turtle Trader is organized as an offline research pipeline:
 
-1. Import and validate user-supplied historical bars.
+1. Download or import and validate historical bars.
 2. Replay causal strategy signals using only data available at each decision
    time.
 3. Apply simulated risk limits and execution assumptions to produce an audit
@@ -10,7 +10,7 @@ Turtle Trader is organized as an offline research pipeline:
 4. Persist the inputs, hashes, outputs, and audit records locally; summarize or
    export reports.
 
-Offline CLI commands are `validate`, `import`, `replay`, `backtest`,
+CLI commands are `download alpaca`, `validate`, `import`, `replay`, `backtest`,
 `report`, `walk-forward`, and `demo`.
 
 The current design keeps market data, strategy logic, risk policy, execution
@@ -76,4 +76,27 @@ deduplication and broker-authoritative restart reconciliation. Persist before
 submission; ambiguous acknowledgments freeze exposure and reconcile rather than
 blindly resubmit. Protective coverage requires confirmation for actual filled
 shares. Scanner filters, scheduler, Gatus health, Signal-compatible notifications,
-Alpaca data and all live integration remain deferred.
+and all live integration remain deferred. Explicit Alpaca historical acquisition
+is implemented separately from the execution boundary.
+
+## Acquisition and adjusted-price research
+
+The Alpaca downloader uses a fixed market-data endpoint, an injected HTTP client,
+bounded retries and token-based pagination. Temporary SQLite storage validates
+and deduplicates rows before deterministic CSV export. A directory rename publishes
+completed artifacts; failed acquisition publishes diagnostics without a usable
+dataset. No trading client is instantiated.
+
+The shared `coverage_report` function compares observed bars with the existing
+exchange calendar and compresses missing intervals into unclassified ranges. It
+does not create an expected timestamp/symbol Cartesian set or forward-fill bars.
+The downloader reports gaps while the importer decides whether strict rejection
+or reference-replay warnings apply.
+
+Manifests default to the original `action_free` price basis. The explicit
+`adjusted_research` basis requires full vendor adjustments and no action-free
+attestation. CLI import/replay/backtest/walk-forward and regenerated reports carry
+this basis and research warnings; `run_backtest` exposes an equivalent optional
+argument. Signal and risk formulas remain unchanged. The execution model simulates
+adjusted units, without dividend cash, split/share transformations or point-in-time
+corporate-action accounting. Corporate-action discovery remains outside scope.

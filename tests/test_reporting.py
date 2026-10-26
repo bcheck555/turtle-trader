@@ -13,6 +13,7 @@ from turtle_trader.reporting import (
     jsonable,
     summarize_result,
 )
+from turtle_trader.research import ADJUSTED_RESEARCH_WARNING
 
 
 def sample_result() -> dict[str, object]:
@@ -139,6 +140,30 @@ def test_benchmark_mismatch_is_reported() -> None:
     summary = summarize_result(result, [(datetime(2026, 1, 1, tzinfo=UTC), 50)])
     assert summary["benchmark_return"] is None
     assert summary["benchmark_status"] == "endpoint_mismatch"
+
+
+def test_research_labels_propagate_to_summary_json_and_csv(tmp_path: Path) -> None:
+    warning = ADJUSTED_RESEARCH_WARNING
+    result = {
+        "price_basis": "adjusted_research",
+        "research_warnings": [warning],
+        "equity": [{"time": datetime(2026, 1, 1, tzinfo=UTC), "equity": 10}],
+        "fills": [],
+    }
+    summary = summarize_result(result)
+    assert summary["price_basis"] == "adjusted_research"
+    assert summary["research_warnings"] == [warning]
+
+    json_path = export_report_json(result, tmp_path / "adjusted.json")
+    report = json.loads(json_path.read_text())
+    assert report["price_basis"] == "adjusted_research"
+    assert report["research_warnings"] == [warning]
+
+    csv_path = export_report_csv(result, tmp_path / "adjusted.csv")
+    with csv_path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["price_basis"] == "adjusted_research"
+    assert rows[0]["research_warnings"] == json.dumps([warning], separators=(",", ":"))
 
 
 def test_exports_json_and_csv(tmp_path: Path) -> None:

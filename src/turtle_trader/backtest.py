@@ -28,6 +28,7 @@ from .domain import (
 )
 from .execution import OfflineBroker, OrderState
 from .portfolio import Portfolio, Position
+from .research import PriceBasis, research_warnings, validate_price_basis
 from .risk import DailyLossGuard, size_entry
 from .strategy import Strategy
 
@@ -100,6 +101,8 @@ class BacktestResult:
     positions: list[Position] = field(default_factory=list)
     order_states: list[OrderState] = field(default_factory=list)
     metrics: dict[str, Decimal | int | float | str] = field(default_factory=dict)
+    price_basis: PriceBasis = "action_free"
+    research_warnings: list[str] = field(default_factory=list)
 
 
 def decimal(value: float) -> Decimal:
@@ -355,6 +358,7 @@ class _Replay:
 def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
                  risk_config: RiskConfig, execution_config: ExecutionConfig,
                  calendar: Calendar | None = None, *,
+                 price_basis: PriceBasis = "action_free",
                  trade_start: datetime | None = None,
                  trade_end: datetime | None = None) -> BacktestResult:
     """Replay chronological, nonoverlapping per-symbol bars without liquidation.
@@ -363,6 +367,7 @@ def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
     reentry event within the trading window. End positions remain marked, without
     liquidation. Cross-symbol candles must share nonoverlapping boundaries.
     """
+    price_basis = validate_price_basis(price_basis)
     for boundary in (trade_start, trade_end):
         if boundary is not None and boundary.tzinfo is None:
             raise ValueError("trade boundaries must be timezone-aware")
@@ -404,4 +409,7 @@ def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
         previous_close = batch[0].time_close
         replay.open_batch(batch)
         replay.close_batch(batch)
-    return replay.finish()
+    result = replay.finish()
+    result.price_basis = price_basis
+    result.research_warnings = research_warnings(price_basis)
+    return result

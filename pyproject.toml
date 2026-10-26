@@ -7,7 +7,7 @@ name = "turtle-trader"
 version = "0.1.0"
 description = "Offline Revelio indicator replay and causal equity backtesting"
 requires-python = ">=3.12"
-dependencies = ["exchange-calendars>=4.11,<5"]
+dependencies = ["exchange-calendars>=4.11,<5", "httpx>=0.28,<1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "pytest-cov>=6,<8", "ruff>=0.11,<1", "mypy>=1.15,<2"]

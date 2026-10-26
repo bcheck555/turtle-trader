@@ -1,10 +1,11 @@
-"""Offline CLI. All network execution and live modes are intentionally absent."""
+"""Offline research and explicit historical-data downloads; no live order execution."""
 
 import argparse
 import base64
 import csv
 import hashlib
 import json
+import os
 import sys
 from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
@@ -13,7 +14,10 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from turtle_trader import __version__
+from turtle_trader.alpaca import DownloadRequest, DownloadResult, download_alpaca
 from turtle_trader.backtest import run_backtest
 from turtle_trader.config import load_config
 from turtle_trader.data import Dataset, load_dataset
@@ -24,6 +28,7 @@ from turtle_trader.reporting import (
     jsonable,
     summarize_result,
 )
+from turtle_trader.research import research_warnings
 from turtle_trader.strategy import Strategy
 
 
@@ -81,6 +86,8 @@ def _replay(data: Dataset, config: Any) -> dict[str, Any]:
     strategies = {symbol: Strategy(config.strategy) for symbol in data.manifest.symbols}
     events = [strategies[bar.symbol].on_bar(bar) for bar in data.bars]
     return {"events": events, "warnings": data.warnings, "manifest": data.manifest,
+            "price_basis": data.manifest.price_basis,
+            "research_warnings": research_warnings(data.manifest.price_basis),
             "external_parity_verified": False}
 
 
@@ -93,7 +100,9 @@ def _save(args: argparse.Namespace, kind: str, config: object, data: Dataset,
     payload = result if isinstance(result, dict) else {"result": result}
     payload["metadata"] = {"engine_version": __version__, "config_sha256": config_hash,
                            "data_sha256": data.data_hash, "source_sha256": reference_hash,
-                           "execution": "offline", "external_parity_verified": False}
+                           "execution": "offline", "external_parity_verified": False,
+                           "price_basis": data.manifest.price_basis,
+                           "research_warnings": research_warnings(data.manifest.price_basis)}
     return RunStore(args.database).save(kind, config, data.data_hash, payload, reference_hash)
 
 
@@ -126,6 +135,17 @@ def _demo(directory: Path) -> dict[str, str]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    download = commands.add_parser("download", help="download historical data; never trades")
+    providers = download.add_subparsers(dest="provider", required=True)
+    alpaca = providers.add_parser("alpaca", help="Alpaca historical US equity bars")
+    alpaca.add_argument("--symbols", nargs="+", required=True)
+    alpaca.add_argument("--start", type=date.fromisoformat, required=True)
+    alpaca.add_argument("--end", type=date.fromisoformat, required=True)
+    alpaca.add_argument("--output", type=Path, required=True)
+    alpaca.add_argument("--interval", type=int, choices=(1, 2, 3, 5, 6, 10, 15, 30), default=5,
+                        help="candle interval in minutes (default: 5)")
+    alpaca.add_argument("--feed", choices=("sip", "iex"), default="sip")
+    alpaca.add_argument("--coverage", choices=("regular", "extended"), default="regular")
     demo = commands.add_parser("demo", help="write deterministic synthetic smoke-test data")
     demo.add_argument("directory", type=Path)
     for name in ("validate", "import", "replay", "backtest", "walk-forward"):
@@ -153,15 +173,31 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _alpaca_client() -> httpx.Client:
+    """Access credentials only for an explicitly invoked download command."""
+    key = os.environ.get("APCA_API_KEY_ID", "")
+    secret = os.environ.get("APCA_API_SECRET_KEY", "")
+    if not key.strip() or not secret.strip():
+        raise ValueError("Alpaca download requires APCA_API_KEY_ID and APCA_API_SECRET_KEY")
+    if any(ord(c) < 32 or ord(c) > 126 for c in key + secret):
+        raise ValueError("Alpaca credential format invalid")
+    return httpx.Client(headers={"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret},
+                        timeout=httpx.Timeout(30, connect=10), follow_redirects=False)
+
+
 def _run(args: argparse.Namespace) -> object:
+    if args.command == "download":
+        request = DownloadRequest(tuple(args.symbols), args.start, args.end, args.interval,
+                                  args.feed, args.coverage)
+        with _alpaca_client() as client:
+            return download_alpaca(request, args.output, client=client)
     if args.command == "demo":
         return _demo(args.directory)
     if args.command == "report":
         record = RunStore(args.database).load(args.run_id)
-        result = record["result"]
         benchmark = _benchmark(args.benchmark)
-        export_report_json(result, args.output, benchmark)
-        export_report_csv(result, args.output.with_suffix(".csv"))
+        export_report_json(record, args.output, benchmark)
+        export_report_csv(record, args.output.with_suffix(".csv"))
         return {"run_id": args.run_id, "report": str(args.output)}
     config = load_config(args.config)
     strict = not (args.command == "replay" and args.allow_gaps)
@@ -169,10 +205,14 @@ def _run(args: argparse.Namespace) -> object:
     if config.strategy.interval_minutes != data.manifest.interval_minutes:
         raise ValueError("strategy interval must match dataset interval")
     if args.command == "validate":
-        return {"bars": len(data.bars), "data_hash": data.data_hash, "warnings": data.warnings}
+        return {"bars": len(data.bars), "data_hash": data.data_hash, "warnings": data.warnings,
+                "price_basis": data.manifest.price_basis,
+                "research_warnings": research_warnings(data.manifest.price_basis)}
     if args.command == "import":
-        result = {"bars": data.bars, "manifest": data.manifest, "warnings": data.warnings}
-        return {"run_id": _save(args, "import", config, data, result)}
+        import_result = {"bars": data.bars, "manifest": data.manifest, "warnings": data.warnings,
+                         "price_basis": data.manifest.price_basis,
+                         "research_warnings": research_warnings(data.manifest.price_basis)}
+        return {"run_id": _save(args, "import", config, data, import_result)}
     if args.command == "replay":
         return {"run_id": _save(args, "replay", config, data, _replay(data, config))}
     if data.manifest.coverage != "custom" and (
@@ -200,7 +240,8 @@ def _run(args: argparse.Namespace) -> object:
     records = []
     for index, (trade_start, trade_end) in enumerate(windows):
         result = run_backtest(data.bars, config.strategy, config.risk, config.execution,
-                              trade_start=trade_start, trade_end=trade_end)
+                              trade_start=trade_start, trade_end=trade_end,
+                              price_basis=data.manifest.price_basis)
         report = summarize_result(result, benchmark)
         bundle = {**asdict(result), "report": report, "warnings": data.warnings,
                   "manifest": data.manifest, "trade_start": trade_start, "trade_end": trade_end}
@@ -220,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         value = _run(args)
         print(json.dumps(jsonable(value), allow_nan=False, sort_keys=True))
-        return 0
+        return value.exit_code if isinstance(value, DownloadResult) else 0
     except (ValueError, OSError, KeyError, TypeError, ArithmeticError) as exc:
         print(json.dumps({"level": "error", "message": str(exc)}, allow_nan=False),
               file=sys.stderr)

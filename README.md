@@ -1,8 +1,8 @@
 # Turtle Trader
 
-Turtle Trader is an offline research tool for replaying indicator signals and
-backtesting causal equity strategies. It does not connect to a broker or place
-orders. No live execution module is included.
+Turtle Trader replays indicator signals and backtests causal equity strategies.
+An explicit Alpaca command downloads historical market data. No brokerage order
+connection or live execution module is included.
 
 The supplied Revelio Pine indicator is translated into a reference state machine.
 Parity against exported TradingView observations is not independently verified. An
@@ -81,10 +81,52 @@ them from vendor outages. `replay --allow-gaps` retains source behavior with
 warnings. No candles are forward-filled. Extended hours are 04:00–20:00 New York
 on exchange dates; early-close dates conservatively end at the regular close.
 
-This milestone requires consistently adjusted, action-free data. Unsupported
-adjustment/action metadata is rejected; undeclared corporate actions cannot be
-independently detected. Split/dividend event accounting and symbol changes await
-the next milestone. Custom coverage requires explicit `synthetic=true`.
+Legacy manifests require consistently adjusted, action-free data. An explicit
+`price_basis="adjusted_research"` mode also accepts `adjustment="all"` with
+`action_free=false` (action-free status is not attested). Downloader exports use
+this mode. Quantities, fees, equity and returns then describe an adjusted-price
+simulation, not an actual account or point-in-time performance. Vendor adjustments
+may incorporate future events. No dividend cash or split-related share changes
+are booked. Custom coverage requires explicit `synthetic=true`.
+
+## Alpaca historical downloads
+
+Set `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` in the command's environment; keys
+are not CLI arguments or configuration fields. Then run:
+
+```sh
+uv run turtle-trader download alpaca --symbols SPY QQQ \
+  --start 2026-01-02 --end 2026-06-30 --output runs/alpaca-spy-qqq
+uv run turtle-trader validate runs/alpaca-spy-qqq/bars.csv \
+  --manifest runs/alpaca-spy-qqq/manifest.toml
+uv run turtle-trader backtest runs/alpaca-spy-qqq/bars.csv \
+  --manifest runs/alpaca-spy-qqq/manifest.toml --config configs/swing.toml \
+  --output runs/alpaca-swing.json
+```
+
+Defaults are five-minute bars, consolidated `sip`, regular hours and full vendor
+adjustments. `--interval`, `--feed iex`, and `--coverage extended` are explicit
+alternatives. IEX is one exchange, so its OHLCV and gaps differ from consolidated
+SIP. Feed entitlement errors never cause automatic fallback. Dates are inclusive
+New York dates strictly before today, with the requested SIP endpoint at least
+16 minutes old. No warmup period is silently added.
+
+Outputs are `bars.csv`, `manifest.toml`, `coverage.json` and `provenance.json`.
+Coverage lists absent symbols and unclassified missing ranges by symbol/session.
+A missing bar does not establish an outage or no trading; no candles are fabricated.
+Out-of-hours rows are filtered and counted. Existing output directories are refused.
+
+Exit **0** means ready for adjusted-price research; **3** means acquisition
+completed but coverage is incomplete. Exit **3** keeps all files for inspection
+and `replay --allow-gaps`; strict validation/backtesting still reject gaps.
+Exit **2** means input/acquisition failure; acquisition failures publish an error
+report without an apparently complete CSV/manifest. Pagination failures cannot
+publish a successful dataset. Requests are bounded and retried only for transient
+failures. Downloads never call trading endpoints.
+
+See [downloader details](docs/alpaca-downloader.md) for acquisition assumptions and
+provenance. All automated tests mock network access; no live API validation is
+performed during development.
 
 ## Strategy versus execution
 
@@ -112,8 +154,8 @@ External cash flows are unsupported in this offline milestone.
 
 ## Scope and limitations
 
-- The system consumes historical or user supplied data; it does not fetch market
-  data automatically.
+- Historical Alpaca data is fetched only through an explicit download command;
+  replay and backtesting operate on local files.
 - Source-code indicator parity is an external validation task. Matching a
   displayed signal does not establish matching fills or account performance.
 - Simulated prices, slippage, fees, participation, and calendar behavior are
@@ -121,8 +163,8 @@ External cash flows are unsupported in this offline milestone.
 - Exchange calendars cover regular sessions and early closes. For extended-hours
   coverage, data validation conservatively ends the session at the exchange
   close on early-close dates.
-- Broker integrations, paper execution, live execution, scanning, and provider
-  services are deferred. Robinhood feasibility and documented boundaries are in
+- Broker integrations, paper execution, live execution, scanning, and scheduled
+  data services are deferred. Robinhood feasibility and documented boundaries are in
   [the feasibility note](docs/robinhood-feasibility.md).
 
 ## Development
