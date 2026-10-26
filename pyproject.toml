@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "turtle-trader"
+version = "0.1.0"
+description = "Offline Revelio indicator replay and causal equity backtesting"
+requires-python = ">=3.12"
+dependencies = ["exchange-calendars>=4.11,<5"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-cov>=6,<8", "ruff>=0.11,<1", "mypy>=1.15,<2"]
+
+[project.scripts]
+turtle-trader = "turtle_trader.cli:main"
+
+[tool.hatch.build.targets.wheel.force-include]
+"reference" = "turtle_trader/reference"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/turtle_trader"]
+
+[[tool.mypy.overrides]]
+module = ["exchange_calendars.*"]
+ignore_missing_imports = true

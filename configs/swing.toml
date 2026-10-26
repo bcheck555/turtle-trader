@@ -1,0 +1,7 @@
+[strategy]
+day_trading = false
+interval_minutes = 5
+
+[execution]
+market_hours = "regular"
+slippage_bps = "5"
