@@ -1,15 +1,19 @@
-# Chandelier overnight holdings with regular-hours execution.
-# Omitted settings use built-in defaults; see ../docs/configuration.md.
+# System 2 entries with an explicitly alternate exit.
+schema_version = 2
+
 [strategy]
-day_trading = false
-interval_minutes = 5
+entry_strategy = "turtle_s2"
 exit_strategy = "chandelier"
+allow_short = false
 chandelier_timeframe = "session"
 chandelier_length = 22
 chandelier_atr_length = 22
 chandelier_multiple = 3.0
 chandelier_ratchet = true
 
+[risk]
+starting_cash = "25000"
+unit_fraction = "0.01"
+
 [execution]
 market_hours = "regular"
-slippage_bps = "5"

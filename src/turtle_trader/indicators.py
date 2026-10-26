@@ -1,4 +1,4 @@
-"""Small streaming primitives using the Pine indicator's arithmetic."""
+"""Streaming true range and Wilder smoothing used for Turtle N."""
 
 from dataclasses import dataclass
 

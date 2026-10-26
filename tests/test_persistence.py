@@ -1,3 +1,4 @@
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -41,3 +42,13 @@ def test_rejects_non_finite_numbers_without_partial_run(tmp_path: Path, value: o
 def test_load_missing_run_raises_key_error(tmp_path: Path) -> None:
     with pytest.raises(KeyError):
         RunStore(tmp_path / "runs.sqlite").load("missing")
+
+
+def test_legacy_database_rejected_without_modification(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE runs (run_id TEXT PRIMARY KEY)")
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="incompatible"):
+        RunStore(path)
+    assert path.read_bytes() == before

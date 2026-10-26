@@ -1,66 +1,59 @@
-"""Entry sizing and a New York calendar-day loss latch."""
+"""Faith volatility units, portfolio caps, and drawdown sizing capital."""
 
-from datetime import date, datetime
-from decimal import ROUND_FLOOR, Decimal
-from zoneinfo import ZoneInfo
+from datetime import datetime
+from decimal import Decimal
 
-from .domain import ExecutionConfig, RiskConfig, RiskDecision
-
-NY = ZoneInfo("America/New_York")
+from .domain import RiskConfig
 
 
-def size_entry(*, equity: Decimal, cash: Decimal, price: Decimal, stop: Decimal,
-               config: RiskConfig, execution: ExecutionConfig,
-               occupied_positions: int = 0, existing_quantity: int = 0,
-               existing_risk: Decimal = Decimal(0),
-               daily_loss_latched: bool = False) -> RiskDecision:
-    """Bound shares by loss budget, allocation, available cash, and slots.
+class SizingCapital:
+    def __init__(self, starting_cash: Decimal) -> None:
+        self.year: int | None = None
+        self.baseline = self.capital = self.anchor = starting_cash
 
-    Price already includes entry slippage. Risk includes estimated exit slippage
-    and both sides' fees; this is a planned bound, not a guarantee across gaps.
-    """
-    if daily_loss_latched:
-        return RiskDecision(0, "daily_loss_latched")
-    if price <= stop or stop <= 0:
-        return RiskDecision(0, "opening_at_or_below_stop")
-    if existing_quantity == 0 and occupied_positions >= config.max_positions:
-        return RiskDecision(0, "max_positions")
-    exit_price = stop * (1 - execution.slippage_bps / 10000)
-    unit_risk = price - exit_price + 2 * execution.fee_per_share
-    # Entry fees and slippage also reduce equity immediately. Solve against that
-    # post-fill budget, rather than allowing an exactly sized order to exceed it.
-    reference_price = price / (1 + execution.slippage_bps / 10000)
-    entry_cost = price - reference_price + execution.fee_per_share
-    risk_budget = (equity * config.risk_fraction - existing_risk
-                   - (2 + config.risk_fraction) * execution.fee_per_order)
-    allocation = equity * config.allocation_fraction - existing_quantity * price
-    available_cash = cash - execution.fee_per_order
-    limits = (
-        risk_budget / (unit_risk + config.risk_fraction * entry_cost),
-        allocation / price,
-        available_cash / (price + execution.fee_per_share),
-    )
-    quantity = max(0, int(min(limits).to_integral_value(rounding=ROUND_FLOOR)))
-    return RiskDecision(quantity, "accepted" if quantity else "insufficient_budget",
-                        quantity * unit_risk + 2 * execution.fee_per_order
-                        if quantity else Decimal(0))
+    def observe(self, time: datetime, equity: Decimal) -> None:
+        if self.year != time.year:
+            self.year = time.year
+            self.baseline = self.capital = self.anchor = max(Decimal(0), equity)
+        if equity <= 0:
+            self.capital = Decimal(0)
+            return
+        if equity >= self.baseline:
+            self.capital = self.baseline
+            self.anchor = self.baseline
+        # Successive loss thresholds form a geometric series with finite sum.
+        # Beyond that limit no positive sizing capital can satisfy the rule.
+        if equity <= self.anchor - self.capital / 2:
+            self.capital = Decimal(0)
+            self.anchor = equity
+            return
+        while self.capital > 0 and equity <= self.anchor - self.capital * Decimal("0.1"):
+            self.anchor -= self.capital * Decimal("0.1")
+            self.capital *= Decimal("0.8")
 
 
-class DailyLossGuard:
-    """Reset before new-day price marks, using last known midnight equity."""
+def unit_shares(capital: Decimal, n: Decimal, config: RiskConfig) -> int:
+    return max(0, int(capital * config.unit_fraction / n)) if n > 0 else 0
 
-    def __init__(self, config: RiskConfig) -> None:
-        self.config = config
-        self.day: date | None = None
-        self.baseline = config.starting_cash
-        self.latched = False
 
-    def roll_day(self, time: datetime, equity: Decimal) -> None:
-        day = time.astimezone(NY).date()
-        if day != self.day:
-            self.day, self.baseline, self.latched = day, equity, False
+def validate_groups(config: RiskConfig, symbols: set[str]) -> None:
+    for groups in (config.close_groups, config.loose_groups):
+        if groups and set().union(*(set(g) for g in groups)) != symbols:
+            raise ValueError("correlation groups must cover exactly the dataset symbols")
 
-    def observe(self, equity: Decimal) -> bool:
-        if equity <= self.baseline * (1 - self.config.daily_loss_fraction):
-            self.latched = True
-        return self.latched
+
+def unit_limit_reason(config: RiskConfig, symbol: str, direction: int,
+                      occupied: list[tuple[str, int]]) -> str | None:
+    same = [s for s, d in occupied if d == direction]
+    if same.count(symbol) >= config.max_units:
+        return "symbol_unit_limit"
+    if len(same) >= config.direction_limit:
+        return "direction_unit_limit"
+    for groups, limit, reason in (
+        (config.close_groups, config.close_limit, "close_correlation_limit"),
+        (config.loose_groups, config.loose_limit, "loose_correlation_limit"),
+    ):
+        relevant = [g for g in groups if symbol in g] if groups else [tuple(same + [symbol])]
+        if any(sum(s in group for s in same) >= limit for group in relevant):
+            return reason
+    return None

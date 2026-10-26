@@ -1,0 +1,4 @@
+# Cartesian product: six runs; alternate settings are research variants.
+[parameters]
+"strategy.entry_length" = [40, 55, 70]
+"strategy.exit_length" = [15, 20]

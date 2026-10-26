@@ -87,8 +87,8 @@ def test_csv_rows_keep_strategy_and_research_labels_separate(tmp_path: Path) -> 
     assert CHANDELIER_STRATEGY_WARNING not in record["research_warnings"]
 
 
-def test_legacy_result_defaults_to_revelio_and_config_only_loads_defaults() -> None:
-    assert summarize_result({"equity": [], "fills": []})["exit_strategy"] == "revelio"
+def test_empty_result_uses_turtle_channel_defaults() -> None:
+    assert summarize_result({"equity": [], "fills": []})["exit_strategy"] == "turtle_channel"
     assert summarize_result({"equity": [], "fills": [], "price_basis": "adjusted_research"})[
         "strategy_warnings"
     ] == []
@@ -97,9 +97,9 @@ def test_legacy_result_defaults_to_revelio_and_config_only_loads_defaults() -> N
 @pytest.mark.parametrize(
     "result",
     [
-        {"exit_strategy": "other", "equity": [], "fills": []},
+        {"exit_strategy": "", "equity": [], "fills": []},
         {
-            "exit_strategy": "revelio",
+            "exit_strategy": "turtle_channel",
             "config": {"strategy": {"exit_strategy": "chandelier"}},
             "equity": [],
             "fills": [],

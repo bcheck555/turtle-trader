@@ -201,19 +201,18 @@ def _strategy_identity(value: Any) -> tuple[str, dict[str, Any], list[str]]:
             if warning not in warnings:
                 warnings.append(warning)
 
-    if any(not isinstance(selector, str) or selector not in ("revelio", "chandelier")
-           for selector in selectors):
-        raise ValueError("exit_strategy must be revelio or chandelier")
+    if any(not isinstance(selector, str) or not selector for selector in selectors):
+        raise ValueError("exit_strategy must be a nonempty strategy identifier")
     if len(set(selectors)) > 1:
         raise ValueError("conflicting exit_strategy metadata")
-    exit_strategy = selectors[0] if selectors else "revelio"
+    exit_strategy = selectors[0] if selectors else "turtle_channel"
 
     merged_settings: dict[str, Any] = {}
     for candidate in setting_sources:
         for key, setting in candidate.items():
             if not isinstance(key, str) or not _valid_strategy_setting(setting):
                 raise ValueError("strategy_settings contains an invalid setting")
-            if key in merged_settings and merged_settings[key] != setting:
+            if key in merged_settings and _jsonable(merged_settings[key]) != _jsonable(setting):
                 raise ValueError(f"conflicting strategy setting: {key}")
             merged_settings[key] = setting
     if "exit_strategy" in merged_settings and merged_settings["exit_strategy"] != exit_strategy:
@@ -250,7 +249,7 @@ def _benchmark_return(benchmark: Iterable[Any], start: Any, end: Any) -> float |
 
 
 def _trade_metrics(fills: Iterable[Any]) -> dict[str, Any]:
-    """Match long fills, allocating all fill fees across their quantities."""
+    """Match signed fills, allocating fees across flat-to-flat campaigns."""
     quantity: dict[str, int] = {}
     basis: dict[str, float] = {}
     cycle_pnl: dict[str, float] = {}
@@ -267,21 +266,33 @@ def _trade_metrics(fills: Iterable[Any]) -> dict[str, Any]:
         if not symbol or qty <= 0 or price is None:
             continue
         held = quantity.get(symbol, 0)
-        if side == "buy":
-            basis[symbol] = basis.get(symbol, 0.0) + price * qty + fee
-            quantity[symbol] = held + qty
+        if side not in ("buy", "sell"):
+            continue
+        signed = qty if side == "buy" else -qty
+        if not held or held * signed > 0:
+            direction = 1 if signed > 0 else -1
+            basis[symbol] = basis.get(symbol, 0.0) + price * qty + direction * fee
+            quantity[symbol] = held + signed
             cycle_pnl.setdefault(symbol, 0.0)
-        elif side == "sell" and held:
-            closed = min(held, qty)
-            average_cost = basis[symbol] / held
-            net_pnl = (price - average_cost) * closed - fee
+        else:
+            closed = min(abs(held), qty)
+            average_cost = basis[symbol] / abs(held)
+            direction = 1 if held > 0 else -1
+            net_pnl = direction * (price - average_cost) * closed - fee * closed / qty
             realized_pnl += net_pnl
             cycle_pnl[symbol] = cycle_pnl.get(symbol, 0.0) + net_pnl
-            quantity[symbol] = held - closed
-            basis[symbol] = average_cost * (held - closed)
+            remaining = abs(held) - closed
+            quantity[symbol] = direction * remaining
+            basis[symbol] = average_cost * remaining
             if quantity[symbol] == 0:
                 closed_cycles.append(cycle_pnl.pop(symbol, 0.0))
                 basis.pop(symbol, None)
+            if qty > closed:
+                opened = qty - closed
+                next_direction = 1 if signed > 0 else -1
+                quantity[symbol] = next_direction * opened
+                basis[symbol] = price * opened + next_direction * fee * opened / qty
+                cycle_pnl[symbol] = 0.0
 
     winners = sum(pnl > 0 for pnl in closed_cycles)
     gross_profit = sum(pnl for pnl in closed_cycles if pnl > 0)
@@ -305,6 +316,14 @@ def summarize_result(result: Any, benchmark: Iterable[Any] | None = None) -> dic
     """
     price_basis, warnings = _research_metadata(result)
     exit_strategy, strategy_settings, strategy_warnings = _strategy_identity(result)
+    canonical_deviations: list[str] = []
+    for layer in _run_layers(result):
+        for container in (layer, _get(layer, "metadata", {})):
+            for change in _get(container, "canonical_deviations", []) or []:
+                if not isinstance(change, str):
+                    raise ValueError("canonical_deviations must contain strings")
+                if change not in canonical_deviations:
+                    canonical_deviations.append(change)
     result = _run_result(result)
     equity_points = list(_get(result, "equity", []) or [])
     fills = list(_get(result, "fills", []) or [])
@@ -320,7 +339,7 @@ def summarize_result(result: Any, benchmark: Iterable[Any] | None = None) -> dic
         if starting is not None and ending is not None and starting != 0
         else None
     )
-    peak: float | None = None
+    peak: float | None = starting
     max_drawdown = 0.0 if valid_equity else None
     for value in valid_equity:
         peak = value if peak is None else max(peak, value)
@@ -353,6 +372,7 @@ def summarize_result(result: Any, benchmark: Iterable[Any] | None = None) -> dic
         benchmark_status = "matched" if benchmark_result is not None else "endpoint_mismatch"
 
     return {
+        "schema_version": 2,
         "starting_equity": starting,
         "ending_equity": ending,
         "total_return": returns,
@@ -379,6 +399,10 @@ def summarize_result(result: Any, benchmark: Iterable[Any] | None = None) -> dic
         "exit_strategy": exit_strategy,
         "strategy_settings": _jsonable(strategy_settings),
         "strategy_warnings": strategy_warnings,
+        "canonical_deviations": canonical_deviations,
+        "entry_strategy": strategy_settings.get("entry_strategy", "turtle_s2"),
+        "fees": sum(_number(_get(fill, "fee", 0)) or 0.0 for fill in fills),
+        "borrow_costs": _number(_get(metrics, "borrow_costs", 0)) or 0.0,
     }
 
 
@@ -391,6 +415,7 @@ def export_report_json(
     price_basis, warnings = _research_metadata(result)
     exit_strategy, strategy_settings, strategy_warnings = _strategy_identity(result)
     payload = {
+        "schema_version": 2,
         "price_basis": price_basis,
         "research_warnings": warnings,
         "exit_strategy": exit_strategy,

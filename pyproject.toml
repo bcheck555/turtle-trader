@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "turtle-trader"
-version = "0.1.0"
-description = "Offline Revelio indicator replay and causal equity backtesting"
+version = "0.2.0"
+description = "Faith-based Turtle equity research and deterministic parameter sweeps"
 requires-python = ">=3.12"
 dependencies = ["exchange-calendars>=4.11,<5", "httpx>=0.28,<1"]
 
@@ -16,7 +16,7 @@ dev = ["pytest>=8,<10", "pytest-cov>=6,<8", "ruff>=0.11,<1", "mypy>=1.15,<2"]
 turtle-trader = "turtle_trader.cli:main"
 
 [tool.hatch.build.targets.wheel.force-include]
-"reference" = "turtle_trader/reference"
+"src/turtle_trader/rule_spec.md" = "turtle_trader/rule_spec.md"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

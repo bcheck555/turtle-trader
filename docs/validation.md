@@ -1,48 +1,54 @@
-# Offline milestone validation
+# Validation
 
-## Checks performed
+Version 2 verification targets the [packaged rule specification](../src/turtle_trader/rule_spec.md)
+and deterministic equity conventions. Historical comparisons from earlier
+implementations do not establish these rules' correctness or expected returns.
 
-- Complete pytest suite on Python 3.12 and Python 3.13: 121 passed.
-- Coverage on Python 3.13: 91% overall; strategy, sessions, indicators and risk 100%.
-- Ruff checks and strict mypy: passed.
-- Source distribution and wheel build: passed.
-- Isolated wheel installation verified archived original-source SHA-256.
-- CLI integration exercised import, replay, backtest, report, holdout/fold plumbing,
-  persistent round trips, and original-source integrity.
-- Synthetic reference/swing demo reports generated locally under ignored `runs/`.
+Run the complete checks from the repository root:
 
-The exchange-calendar dependency emits pandas deprecation warnings. They did not
-fail validation. Test coverage measures exercised code, not proof of correctness
-or profitable trading.
+```sh
+uv run pytest
+uv run ruff check src tests
+uv run mypy
+uv build
+```
 
-## Independent reviews
+Release validation also installs the built wheel into an isolated environment,
+checks that the rule specification is packaged, and exercises CLI help, resolved
+configuration, demo replay/backtest and a small parameter sweep. Record actual
+command results with the implementation commit; this document does not claim a
+particular checkout passed them.
 
-GPT-6.1 Sol at High reasoning implemented strategy and execution components in
-separate agent assignments. Independent GPT-6.1 Sol High agents reviewed strategy
-against the Pine source and reviewed execution/risk accounting. GPT-6 Luna at
-Medium implemented reporting/storage; coordinator integrated the application.
+## Rule and execution coverage
 
-Strategy review found no core translation defect. Additional regressions cover
-falling active exits, missed Friday closes/Sunday reopening, held unconfirmed
-previews and UTC/New York equivalence across DST.
+- Hand-calculated true range/N, initialization, weekly publication and frozen
+  campaign inputs.
+- Prior-session channels, tick boundaries, opening gaps, System 1 filtering and
+  failsafe, and System 2 entry/exit behavior.
+- Hypothetical short breakouts with actual shorts disabled; hypothetical outcomes
+  independent of cash rejection and selected actual exits.
+- Whole-share sizing, actual-fill addition spacing, individual lot-stop movement,
+  drawdown reductions, annual reset and 4/6/10/12 unit limits.
+- Pending reservations, partial fills, cash rejection, deterministic simultaneous
+  symbols and conservative OHLC path selection.
+- Regular sessions, early closes, daylight saving, incomplete data, warmup and
+  final open positions.
+- Mirrored optional shorts, collateral release, calendar-day borrow fees, forced
+  partial covers and negative-cash behavior.
+- Alternate-exit causality, including [Chandelier scenarios](chandelier-validation.md).
 
-Execution review reproduced a partial-fill sizing defect: fees/slippage on filled
-shares were omitted from remaining planned risk. Corrected sizing includes these
-costs and post-fill equity; regression verifies changing fill prices respect the
-configured risk fraction. Inferred intrabar fills now disclose their candle
-bounds and uncertain execution time. No remaining blocking review finding.
+## Experiment and compatibility coverage
 
-## Boundaries
+- Configuration precedence, TOML literal types, duplicates, unknown/obsolete keys
+  and canonical-deviation reporting.
+- Equivalent standalone and sweep runs; stable grid expansion and results across
+  worker counts, combination limits, preflight validation and failure aggregation.
+- Output isolation, atomic statuses, collision refusal, interrupted-run resume,
+  completed-artifact identity and failed-run retries.
+- CLI JSON output/errors, export/persistence round trips and refusal of legacy
+  formats without modifying existing databases.
+- Absence of superseded implementation artifacts from maintained files and the
+  installed package.
 
-Source-derived unit fixtures are not externally exported TradingView ground
-truth. Platform parity remains unverified. The source is an indicator, without
-portfolio returns or executable fills. Synthetic reports are software smoke tests.
-
-Direct backtest API callers must separately validate data coverage. Historical
-volume caps model a scenario; actual queue priority/liquidity is unknown. Partial
-protective fills and missing deadline quotes can leave exposure. Open positions
-and orders remain explicit at run end. No broker-side acceptance is claimed.
-
-Persistent paper execution/recovery, scanner/services, provider downloads and live
-trading remain outside this milestone. No brokerage connection or real order was
-made during implementation or validation.
+Acquisition tests mock network access; they do not demonstrate current provider
+entitlement or live data quality. See [downloader validation](downloader-validation.md).

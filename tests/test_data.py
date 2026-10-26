@@ -67,13 +67,13 @@ def test_holidays_early_close_and_dst() -> None:
 
 def test_config_no_live_path(tmp_path: Path) -> None:
     p = tmp_path / "config.toml"
-    p.write_text('[execution]\nmode="live"\n')
+    p.write_text('schema_version=2\n[execution]\nmode="live"\n')
     with pytest.raises(ValueError, match="unknown execution"):
         load_config(p)
-    p.write_text('[risk]\nstarting_cash="NaN"\n')
+    p.write_text('schema_version=2\n[risk]\nstarting_cash="NaN"\n')
     with pytest.raises(ValueError):
         load_config(p)
-    p.write_text('[strategy]\nday_trading="false"\n')
+    p.write_text('schema_version=2\n[strategy]\nallow_short="false"\n')
     with pytest.raises(ValueError, match="boolean"):
         load_config(p)
 

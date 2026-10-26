@@ -35,7 +35,7 @@ def test_raw_indicator_can_fall_and_is_not_trade_ratcheted() -> None:
 
 
 @pytest.mark.parametrize(("length", "atr_length", "multiple"), [
-    (1, 2, 3), (2, 401, 3), (True, 2, 3), (2, 2, 0),
+    (1, 2, 3), (2, 10001, 3), (True, 2, 3), (2, 2, 0),
     (2, 2, -1), (2, 2, float("inf")), (2, 2, float("nan")),
 ])
 def test_invalid_indicator_parameters(length: int, atr_length: int, multiple: float) -> None:

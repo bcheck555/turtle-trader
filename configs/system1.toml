@@ -1,0 +1,14 @@
+# System 1: 20-session entries, winner filter, 55-session failsafe, 10-session exits.
+schema_version = 2
+
+[strategy]
+entry_strategy = "turtle_s1"
+exit_strategy = "turtle_channel"
+allow_short = false
+
+[risk]
+starting_cash = "25000"
+unit_fraction = "0.01"
+
+[execution]
+market_hours = "regular"

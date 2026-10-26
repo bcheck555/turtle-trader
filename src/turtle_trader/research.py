@@ -11,14 +11,14 @@ ADJUSTED_RESEARCH_WARNING = (
 )
 
 CHANDELIER_STRATEGY_WARNING = (
-    "Chandelier exit is a derived strategy and does not preserve Revelio Pine exit behavior."
+    "Chandelier replaces the original Turtle channel exit; protective Turtle stops remain active."
 )
 
 
 def strategy_warnings(exit_strategy: str) -> list[str]:
-    """Describe an explicitly selected alternative to the reference exit."""
-    if exit_strategy not in ("revelio", "chandelier"):
-        raise ValueError("exit_strategy must be revelio or chandelier")
+    """Describe an explicitly selected alternative to the original channel exit."""
+    if exit_strategy not in ("turtle_channel", "chandelier"):
+        return [f"Custom exit rule: {exit_strategy}"]
     return [CHANDELIER_STRATEGY_WARNING] if exit_strategy == "chandelier" else []
 
 

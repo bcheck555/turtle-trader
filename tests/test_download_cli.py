@@ -160,7 +160,7 @@ def test_walkforward_reports_preserve_research_basis(tmp_path: Path) -> None:
                         + 'price_basis="adjusted_research"\n')
     assert cli.main(["walk-forward", str(demo / "bars.csv"), "--manifest", str(manifest),
                      "--database", str(tmp_path / "folds.sqlite"), "--warmup-days", "30",
-                     "--fold-days", "7", "--output", str(tmp_path / "fold.json")]) == 0
+                     "--fold-days", "30", "--output", str(tmp_path / "fold.json")]) == 0
     reports = list(tmp_path.glob("fold-*.json"))
     assert len(reports) >= 2
     for report in reports:

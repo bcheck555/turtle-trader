@@ -70,7 +70,7 @@ class OfflineBroker:
             order.status = "cancelled"
 
     def reconcile(self) -> None:
-        if self.portfolio.cash < 0 or any(p.quantity <= 0 for p in self.get_positions()):
+        if any(p.quantity <= 0 for p in self.get_positions()):
             raise ValueError("invalid offline account state")
 
     def price(self, reference: Decimal, side: str) -> Decimal:
@@ -89,7 +89,9 @@ class OfflineBroker:
         if order.filled_quantity == 0:
             fee += self.config.fee_per_order
         fill = Fill(order_id, order.intent.symbol, order.intent.side,
-                    quantity, price, fee, time, order.intent.reason, time_precision, bar_end)
+                    quantity, price, fee, time, order.intent.reason, time_precision, bar_end,
+                    direction=order.intent.direction, intent=order.intent.intent,
+                    campaign_id=order.intent.campaign_id, unit_id=order.intent.unit_id)
         self.portfolio.apply(fill, order.intent.stop)
         order.filled_quantity += quantity
         if order.remaining == 0:

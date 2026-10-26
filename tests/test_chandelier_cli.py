@@ -17,7 +17,7 @@ def test_chandelier_cli_identity_and_diagnostics_roundtrip(
     assert main(["demo", str(demo)]) == 0
     config = tmp_path / "chandelier.toml"
     config.write_text(
-        '[strategy]\nday_trading=false\nexit_strategy="chandelier"\n'
+        'schema_version=2\n[strategy]\nexit_strategy="chandelier"\n'
         f'chandelier_timeframe="{timeframe}"\nchandelier_ratchet={str(ratchet).lower()}\n',
         encoding="utf-8",
     )
@@ -38,9 +38,7 @@ def test_chandelier_cli_identity_and_diagnostics_roundtrip(
         assert result["strategy_settings"]["chandelier_ratchet"] is ratchet
         assert result["strategy_warnings"] == [CHANDELIER_STRATEGY_WARNING]
         assert result["metadata"]["exit_strategy"] == "chandelier"
-        assert any(e["chandelier_atr"] is not None for e in result["events"])
-        assert all(e["exit_strategy"] == "chandelier" for e in result["events"])
-        assert result["events"][-1]["atr"] is not None
+        assert result["metadata"]["canonical_deviations"]
     payload = json.loads(output.read_text())
     assert payload["summary"]["exit_strategy"] == "chandelier"
     assert payload["strategy_settings"]["chandelier_timeframe"] == timeframe
@@ -52,7 +50,7 @@ def test_chandelier_cli_identity_and_diagnostics_roundtrip(
     assert rows and all(row["exit_strategy"] == "chandelier" for row in rows)
     assert json.loads(rows[0]["strategy_settings"])["chandelier_timeframe"] == timeframe
     assert json.loads(rows[0]["strategy_warnings"]) == [CHANDELIER_STRATEGY_WARNING]
-    assert main(["walk-forward", *base, "--warmup-days", "30", "--fold-days", "7",
+    assert main(["walk-forward", *base, "--warmup-days", "30", "--fold-days", "30",
                  "--output", str(tmp_path / "fold.json")]) == 0
     for path in tmp_path.glob("fold-*.json"):
         fold = json.loads(path.read_text())

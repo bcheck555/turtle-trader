@@ -1,228 +1,206 @@
-from dataclasses import replace
-from datetime import UTC, datetime, timedelta
-from decimal import Decimal as D
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 
-from turtle_trader import backtest
-from turtle_trader.domain import Bar, ExecutionConfig, OrderIntent, RiskConfig, StrategyConfig
-from turtle_trader.domain import StrategyEvents as Event
-from turtle_trader.execution import OfflineBroker
+from turtle_trader.backtest import _Replay, run_backtest
+from turtle_trader.domain import Bar, ExecutionConfig, RiskConfig, StrategyConfig
 from turtle_trader.portfolio import Portfolio
 
-START = datetime(2025, 1, 2, 15, 0, tzinfo=UTC)
-RISK = RiskConfig(starting_cash=D(1000), risk_fraction=D(".1"),
-                  allocation_fraction=D(1), daily_loss_fraction=D(".9"))
-EXECUTION = ExecutionConfig(slippage_bps=D(0))
+D = Decimal
+START = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
+FREE = ExecutionConfig(slippage_bps=D(0))
 
 
-class AllHours:
-    def eligible(self, at, market_hours="regular"):
+class FixtureCalendar:
+    """Explicit synthetic five-minute sessions for focused engine tests."""
+
+    def eligible(self, at: datetime, market_hours: str = "regular") -> bool:
         return True
 
 
-def bar(index, opening=100, low=99, close=100, volume=1000, symbol="A"):
-    time = START + timedelta(minutes=index * 5)
-    return Bar(symbol, time, time + timedelta(minutes=5), opening,
-               max(opening, close) + 1, low, close, volume)
+def candle(index: int = 0, *, opening: float = 100, high: float = 101,
+           low: float = 99, close: float = 100, volume: int = 100000,
+           symbol: str = "ABC") -> Bar:
+    at = START + timedelta(days=index)
+    return Bar(symbol, at, at + timedelta(minutes=5), opening, high, low, close, volume)
 
 
-def replay(monkeypatch, bars, changes, **kwargs):
-    class ScriptedStrategy:
-        def __init__(self, config):
-            pass
-
-        def on_bar(self, current):
-            index = int((current.time - START).total_seconds() // 300)
-            fields = changes.get((current.symbol, index), changes.get(index, {}))
-            return Event(current.symbol, current.time, current.time_close,
-                         **({"held": True, "initial_stop": 90, "active_stop": 90} | fields))
-
-    monkeypatch.setattr(backtest, "Strategy", ScriptedStrategy)
-    return backtest.run_backtest(bars, StrategyConfig(), kwargs.pop("risk", RISK),
-                                 kwargs.pop("execution", EXECUTION), AllHours(), **kwargs)
+def warmed(*, strategy: StrategyConfig | None = None,
+           risk: RiskConfig | None = None, execution: ExecutionConfig = FREE,
+           symbols: set[str] | None = None) -> _Replay:
+    replay = _Replay(strategy or StrategyConfig(), risk or RiskConfig(unit_fraction=D("0.001")),
+                     execution, symbols or {"ABC"}, None, None)
+    for rule in replay.strategies.values():
+        for _ in range(60):
+            rule.update_session(101, 99, 100)
+        rule.publish_week()
+    replay.weekly_shares = {s: 12 for s in replay.strategies}
+    replay.sizing.observe(START, replay.portfolio.equity)
+    return replay
 
 
-def test_signal_close_cannot_fill_own_bar_and_gap_rechecks_size(monkeypatch):
-    result = replay(monkeypatch, [bar(0), bar(1, opening=110, low=100, close=110)],
-                    {0: {"entry": True}})
-    assert len(result.fills) == 1
-    fill = result.fills[0]
-    assert (fill.quantity, fill.price, fill.time) == (5, D(110), bar(1).time)
-    assert result.orders[0].quantity == 10
-    assert result.metrics["ending_cash"] == D(450)
-    assert result.metrics["ending_equity"] == D(1000)
+def test_default_system_requires_55_sessions_and_executes_intraday() -> None:
+    bars = [candle(i) for i in range(60)]
+    bars.append(candle(60, high=102, close=101.5))
+    result = run_backtest(bars, StrategyConfig(), RiskConfig(unit_fraction=D("0.001")),
+                          FREE, FixtureCalendar())
+    opening = [f for f in result.fills if f.intent == "open"]
+    assert opening and opening[0].price == D("101.01")
+    assert opening[0].time == bars[-1].time
+    assert opening[0].time_precision == "intrabar_unknown"
+    assert all(f.direction == 1 for f in result.fills)
+    assert result.positions
 
 
-def test_samebar_reference_round_trip_never_sends_order(monkeypatch):
-    result = replay(monkeypatch, [bar(0), bar(1)],
-                    {0: {"entry": True, "signal_exit": True, "held": False},
-                     1: {"held": False}})
-    assert result.orders == result.fills == []
-    assert result.metrics["reference_round_trips_unexecutable"] == 1
+def test_gap_fill_is_open_not_channel_and_records_actual_stop() -> None:
+    replay = warmed()
+    bar = candle(opening=105, high=105, low=105, close=105)
+    replay.path(bar, True)
+    fill = replay.result.fills[0]
+    assert fill.price == D(105)
+    assert fill.time_precision == "bar_open"
+    assert replay.portfolio.lots[fill.unit_id].stop == D(101)
 
 
-def test_entry_confirmed_then_immediately_protected_and_cash_conserved(monkeypatch):
-    result = replay(monkeypatch, [bar(0), bar(1, low=89)], {0: {"entry": True}})
-    assert [(f.side, f.quantity, f.price) for f in result.fills] == [
-        ("buy", 10, D(100)), ("sell", 10, D(90))]
-    assert result.positions == []
-    assert result.metrics["ending_cash"] == D(900)
-    assert result.metrics["entry_bar_stop_ambiguities"] == 1
-    assert result.fills[0].time_precision == "bar_open"
-    assert result.fills[0].bar_end is None
-    assert result.fills[1].time_precision == "intrabar_unknown"
-    assert result.fills[1].bar_end == bar(1).time_close
-    assert sum((-1 if f.side == "buy" else 1) * f.quantity * f.price - f.fee
-               for f in result.fills) + RISK.starting_cash == D(900)
+def test_multiple_additions_and_separate_lot_stops() -> None:
+    replay = warmed()
+    replay.path(candle(opening=101.01, high=104.5, low=101.01, close=104), True)
+    opens = [f for f in replay.result.fills if f.intent == "open"]
+    assert [f.price for f in opens] == [D("101.01"), D("102.01"), D("103.01"), D("104.01")]
+    assert len(replay.portfolio.lots) == 4
+    assert all(lot.stop == D("100.01") for lot in replay.portfolio.lots.values())
 
 
-def test_source_stop_is_frozen_at_entry_not_reanchored_to_gap_fill(monkeypatch):
-    result = replay(monkeypatch, [bar(0), bar(1, opening=110, low=89, close=100)],
-                    {0: {"entry": True}})
-    assert [f.price for f in result.fills] == [D(110), D(90)]
-    assert result.metrics["ending_cash"] == D(900)
+def test_addition_gap_preserves_different_stops() -> None:
+    replay = warmed()
+    replay.path(candle(opening=101.01, high=101.01, low=101.01, close=101.01), True)
+    replay.path(candle(1, opening=105, high=105, low=105, close=105), True)
+    stops = [p.stop for p in replay.portfolio.lots.values()]
+    assert stops == [D("98.01"), D(101)]
 
 
-def test_opening_at_stop_rejects_entry(monkeypatch):
-    result = replay(monkeypatch, [bar(0), bar(1, opening=90, low=89, close=91)],
-                    {0: {"entry": True}})
-    assert not result.fills
-    assert result.rejections[-1].reason == "opening_at_or_below_stop"
+def test_partial_unit_blocks_additions_and_remainder_reserves_cash() -> None:
+    replay = warmed()
+    replay.path(candle(opening=101.01, high=105, low=101.01, close=105, volume=3), True)
+    assert len(replay.result.orders) == 1
+    assert replay.result.fills[0].quantity == 3
+    assert replay.pending("ABC", "open")[0].remaining == 9
+    assert replay.reserved_cash() == D("909.09")
+    replay.path(candle(1, opening=105, high=105, low=105, close=105, volume=9), True)
+    assert len(replay.result.orders) == 1
+    assert not replay.pending("ABC", "open")
 
 
-def test_strict_stop_and_decreasing_source_band(monkeypatch):
-    result = replay(monkeypatch, [bar(0), bar(1, low=90), bar(2, low=85), bar(3, low=79)],
-                    {0: {"entry": True}, 1: {"active_stop": 80},
-                     2: {"active_stop": 80}, 3: {"held": False}})
-    assert [f.price for f in result.fills] == [D(100), D(80)]
-    assert result.fills[-1].time == bar(3).time
+def test_stop_cancels_unfilled_entry_remainder() -> None:
+    replay = warmed()
+    replay.path(candle(opening=101.01, high=101.01, low=101.01, close=101.01, volume=3), True)
+    replay.path(candle(1, opening=95, high=95, low=95, close=95, volume=100), True)
+    assert not replay.portfolio.lots
+    assert not replay.pending("ABC", "open")
+    assert replay.result.cancellations[0].remaining_quantity == 9
+    assert replay.result.fills[-1].price == 95
 
 
-def test_adverse_gap_and_fees_are_charged_once_per_order(monkeypatch):
-    execution = replace(EXECUTION, fee_per_order=D(1))
-    result = replay(monkeypatch, [bar(0), bar(1), bar(2, opening=80, low=79, close=80)],
-                    {0: {"entry": True}, 2: {"held": False}}, execution=execution)
-    assert [(f.quantity, f.price, f.fee) for f in result.fills] == [
-        (9, D(100), D(1)), (9, D(80), D(1))]
-    assert result.metrics["ending_cash"] == D(818)
-    assert result.metrics["fees"] == D(2)
-    assert result.fills[-1].time_precision == "bar_open"
-    assert result.fills[-1].bar_end is None
+def test_whole_unaffordable_unit_rejected_without_shrinking() -> None:
+    replay = warmed(risk=RiskConfig(starting_cash=D(1000), unit_fraction=D(".1")))
+    replay.weekly_shares["ABC"] = 12
+    replay.path(candle(opening=101.01, high=101.01, low=101.01, close=101.01), True)
+    assert not replay.result.fills
+    assert replay.result.rejections[0].reason == "insufficient_cash"
 
 
-def test_volume_partial_entry_stop_cancels_remainder_and_exits_later(monkeypatch):
-    result = replay(monkeypatch, [bar(0), bar(1, low=89, volume=3),
-                                 bar(2, opening=85, low=84, close=85, volume=3)],
-                    {0: {"entry": True}, 2: {"held": False}})
-    assert [(f.side, f.quantity, f.price) for f in result.fills] == [
-        ("buy", 3, D(100)), ("sell", 3, D(85))]
-    assert result.cancellations[0].remaining_quantity == 7
-    assert result.metrics["ending_cash"] == D(955)
+def test_remainder_rechecked_after_gap_without_silent_resize() -> None:
+    replay = warmed(risk=RiskConfig(starting_cash=D(1300)))
+    replay.path(candle(opening=101.01, high=101.01, low=101.01, close=101.01, volume=3), True)
+    replay.path(candle(1, opening=200, high=200, low=200, close=200), True)
+    assert not replay.pending("ABC", "open")
+    assert any(r.reason == "insufficient_cash" for r in replay.result.rejections)
 
 
-def test_signal_exit_only_executes_at_next_open(monkeypatch):
-    result = replay(monkeypatch, [bar(0), bar(1), bar(2, opening=105, close=105)],
-                    {0: {"entry": True}, 1: {"held": False}, 2: {"held": False}})
-    assert [f.time for f in result.fills] == [bar(1).time, bar(2).time]
-    assert result.metrics["ending_cash"] == D(1050)
+def test_path_cloning_does_not_mutate_original_or_share_shadow_state() -> None:
+    replay = warmed(strategy=StrategyConfig(entry_strategy="turtle_s1"))
+    child = replay.fork()
+    child.path(candle(opening=101.01, high=101.01, low=95, close=100), True)
+    assert not replay.result.fills and not replay.portfolio.lots
+    assert replay.strategies["ABC"].shadow_direction == 0
+    assert child.result.fills
+    assert {e.kind for e in child.result.events} >= {"shadow_entry", "shadow_exit"}
 
 
-def test_deadline_timer_exits_first_eligible_open_and_reports_lateness(monkeypatch):
-    deadline = bar(2).time
-    result = replay(monkeypatch, [bar(0), bar(1), bar(3)],
-                    {0: {"entry": True, "deadline": deadline}})
-    assert result.fills[-1].reason == "scheduled_deadline"
-    assert result.deadline_exits[0].lateness_seconds == 300
+def test_short_option_requires_explicit_borrow_configuration() -> None:
+    with pytest.raises(ValueError, match="shorts require"):
+        run_backtest([], StrategyConfig(allow_short=True), RiskConfig(), FREE)
 
 
-def test_simultaneous_symbols_reserve_cash_and_slots_deterministically(monkeypatch):
-    risk = replace(RISK, max_positions=1)
-    bars = [bar(i, symbol=s) for i in (0, 1) for s in ("B", "A")]
-    changes = {0: {"entry": True}}
-    first = replay(monkeypatch, bars, changes, risk=risk)
-    second = replay(monkeypatch, list(reversed(bars)), changes, risk=risk)
-    assert first.fills == second.fills
-    assert {f.symbol for f in first.fills} == {"A"}
-    assert first.metrics["ending_cash"] == D(0)
-    assert any(r.reason == "max_positions" for r in first.rejections)
+def test_short_fill_stop_collateral_and_cover() -> None:
+    execution = ExecutionConfig(slippage_bps=D(0), shortable_symbols=("ABC",), borrow_rate=D(".1"))
+    replay = warmed(strategy=StrategyConfig(allow_short=True), execution=execution)
+    replay.path(candle(opening=98.99, high=98.99, low=98.99, close=98.99), True)
+    lot = next(iter(replay.portfolio.lots.values()))
+    assert lot.direction == -1 and lot.stop == D("102.99")
+    assert replay.portfolio.collateral == D("1781.820")
+    assert replay.portfolio.available_cash == D("24406.060")
+    replay.path(candle(1, opening=105, high=105, low=105, close=105), True)
+    assert not replay.portfolio.lots
+    assert replay.portfolio.collateral == 0
+    assert replay.result.fills[-1].side == "buy"
+    assert replay.result.fills[-1].intent == "reduce"
 
 
-def test_pending_entries_reserve_cash_even_with_multiple_available_slots(monkeypatch):
-    result = replay(monkeypatch,
-                    [bar(i, symbol=s) for i in (0, 1) for s in ("A", "B")],
-                    {0: {"entry": True}})
-    assert {f.symbol for f in result.fills} == {"A"}
-    assert any(r.reason == "insufficient_budget" for r in result.rejections)
+def test_borrow_weekend_and_forced_cover_queue() -> None:
+    execution = ExecutionConfig(slippage_bps=D(0), shortable_symbols=("ABC",),
+                                borrow_rate=D(".365"))
+    replay = warmed(strategy=StrategyConfig(allow_short=True), execution=execution)
+    replay.path(candle(opening=98.99, high=98.99, low=98.99, close=98.99), True)
+    replay.borrow_day = date(2026, 1, 2)
+    replay.before_batch([candle(opening=120, high=120, low=120, close=120)])
+    assert replay.portfolio.borrow_costs == D("3.56364")
+    assert replay.pending("ABC", "reduce")[0].intent.reason == "forced_cover"
+    replay.path(candle(opening=120, high=120, low=120, close=120, volume=3), True)
+    assert next(iter(replay.portfolio.lots.values())).quantity == 9
 
 
-def test_pending_fill_uses_latest_confirmed_active_stop(monkeypatch):
-    result = replay(monkeypatch, [bar(0), bar(1, volume=0), bar(2, low=94)],
-                    {0: {"entry": True}, 1: {"active_stop": 95}})
-    assert [f.price for f in result.fills] == [D(100), D(95)]
+def test_signed_ledger_partial_cover_releases_proportional_collateral() -> None:
+    from turtle_trader.domain import Fill
+    portfolio = Portfolio(D(1000))
+    portfolio.apply(Fill("1", "ABC", "sell", 10, D(10), D(0), START, "entry",
+                         direction=-1, unit_id="u"))
+    assert portfolio.equity == 1000 and portfolio.available_cash == 950
+    portfolio.apply(Fill("2", "ABC", "buy", 4, D(12), D(0), START, "cover",
+                         direction=-1, intent="reduce", unit_id="u"))
+    assert portfolio.collateral == 90
+    assert portfolio.realized_pnl == -8
 
 
-@pytest.mark.parametrize("slippage, fixed_fee", [(D(0), D(0)), (D(5), D(1))])
-def test_partial_fill_risk_includes_existing_costs_and_new_fill_equity(
-        monkeypatch, slippage, fixed_fee):
-    risk = replace(RISK, risk_fraction=D(".125"))
-    execution = replace(EXECUTION, fee_per_share=D(1), fee_per_order=fixed_fee,
-                        slippage_bps=slippage)
-    result = replay(monkeypatch, [bar(0), bar(1, volume=5),
-                                 bar(2, opening=105, low=104, close=105)],
-                    {0: {"entry": True}}, risk=risk, execution=execution)
-    assert [f.quantity for f in result.fills] == [5, 3]
-    quantity = sum(f.quantity for f in result.fills)
-    exit_price = D(90) * (1 - slippage / 10000)
-    modeled_loss = (sum(f.quantity * (f.price - exit_price) + f.fee for f in result.fills)
-                    + quantity * execution.fee_per_share + fixed_fee)
-    assert modeled_loss <= result.equity[-1].equity * risk.risk_fraction
+def test_no_current_session_lookahead() -> None:
+    replay = warmed()
+    levels = replay.strategies["ABC"].levels()
+    replay.path(candle(high=120, low=100, close=110), False)
+    assert replay.strategies["ABC"].levels() == levels
 
 
-def test_daily_loss_blocks_recovered_equity_until_next_date(monkeypatch):
-    risk = replace(RISK, daily_loss_fraction=D(".02"))
-    result = replay(monkeypatch, [bar(0), bar(1, low=89), bar(2), bar(3)],
-                    {0: {"entry": True}, 2: {"entry": True}}, risk=risk)
-    assert len(result.fills) == 2
-    assert result.risk_decisions[-1].reason == "daily_loss_latched"
+def test_input_order_and_worker_equivalent_engine_determinism() -> None:
+    bars = [candle(i, symbol=s) for i in range(60) for s in ("XYZ", "ABC")]
+    config = StrategyConfig(entry_length=2, exit_length=2, atr_length=2)
+    a = run_backtest(bars, config, RiskConfig(), FREE, FixtureCalendar())
+    b = run_backtest(list(reversed(bars)), config, RiskConfig(), FREE, FixtureCalendar())
+    assert a == b
 
 
-def test_warmup_waits_for_new_entry_and_trade_end_preserves_position(monkeypatch):
-    result = replay(monkeypatch, [bar(i) for i in range(5)],
-                    {0: {"entry": True}, 2: {"entry": True}},
-                    trade_start=bar(1).time + timedelta(seconds=1), trade_end=bar(4).time)
-    assert len(result.fills) == 1
-    assert result.fills[0].time == bar(3).time
-    assert result.positions[0].quantity == 10
+def test_complete_exchange_sessions_and_internal_gap_detection() -> None:
+    class Calendar(FixtureCalendar):
+        def bounds(self, day: date, market_hours: str) -> tuple[datetime, datetime]:
+            start = datetime.combine(day, START.timetz())
+            return start, start + timedelta(minutes=10)
+    bars = [candle(0), candle(1), candle(2)]
+    with pytest.raises(ValueError, match="incomplete internal"):
+        run_backtest(bars, StrategyConfig(), RiskConfig(), FREE, Calendar())
 
 
-def test_future_bars_do_not_change_earlier_fills(monkeypatch):
-    changes = {0: {"entry": True}, 2: {"held": False}}
-    prefix = replay(monkeypatch, [bar(0), bar(1)], changes)
-    extended = replay(monkeypatch, [bar(0), bar(1), bar(2, low=1, close=1)], changes)
-    assert extended.fills[:len(prefix.fills)] == prefix.fills
-
-
-def test_broker_cancellation_prevents_fills_and_enforces_no_shorting():
-    broker = OfflineBroker(Portfolio(D(1000)), EXECUTION)
-    intent = OrderIntent("one", "A", "buy", 2, START, START, "test", D(90))
-    broker.submit_order(intent)
-    broker.cancel_order("one")
-    with pytest.raises(ValueError, match="status"):
-        broker.fill("one", 1, D(100), START)
-    broker.submit_order(replace(intent, id="two", side="sell"))
-    with pytest.raises(ValueError, match="short"):
-        broker.fill("two", 1, D(100), START)
-
-
-@pytest.mark.parametrize("invalid", [
-    replace(bar(0), close=float("nan")),
-    replace(bar(0), volume=-1),
-    replace(bar(0), low=102),
-    replace(bar(0), time_close=bar(0).time_close + timedelta(minutes=1)),
-    replace(bar(0), time=bar(0).time + timedelta(seconds=1),
-            time_close=bar(0).time_close + timedelta(seconds=1)),
-])
-def test_direct_api_rejects_invalid_bars(monkeypatch, invalid):
-    with pytest.raises(ValueError):
-        replay(monkeypatch, [invalid], {})
+@pytest.mark.parametrize("field,value", [("volume", -1), ("high", 90), ("low", 110)])
+def test_invalid_bars_rejected(field: str, value: float) -> None:
+    from dataclasses import replace
+    with pytest.raises(ValueError, match="invalid OHLCV"):
+        run_backtest([replace(candle(), **{field: value})], StrategyConfig(), RiskConfig(),
+                     FREE, FixtureCalendar())

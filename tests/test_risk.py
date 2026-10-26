@@ -1,39 +1,61 @@
-from datetime import datetime
-from decimal import Decimal as D
-from zoneinfo import ZoneInfo
+from datetime import UTC, datetime
+from decimal import Decimal
 
-from turtle_trader.domain import ExecutionConfig, RiskConfig
-from turtle_trader.risk import DailyLossGuard, size_entry
+import pytest
 
+from turtle_trader.domain import RiskConfig
+from turtle_trader.risk import SizingCapital, unit_limit_reason, unit_shares, validate_groups
 
-def test_size_respects_risk_cash_allocation_and_positions():
-    config = RiskConfig(starting_cash=D(1000), risk_fraction=D(".1"),
-                        allocation_fraction=D(1), max_positions=1)
-    args = dict(equity=D(1000), cash=D(1000), price=D(100), stop=D(90),
-                config=config, execution=ExecutionConfig(slippage_bps=D(0)))
-    assert size_entry(**args).quantity == 10
-    assert size_entry(**(args | {"cash": D(250)})).quantity == 2
-    assert size_entry(**(args | {"occupied_positions": 1})).reason == "max_positions"
-    assert size_entry(**(args | {"price": D(90)})).quantity == 0
-    assert size_entry(**(args | {"daily_loss_latched": True})).quantity == 0
+D = Decimal
+AT = datetime(2026, 1, 5, tzinfo=UTC)
 
 
-def test_costs_count_against_planned_risk_and_cash():
-    decision = size_entry(
-        equity=D(1000), cash=D(1000), price=D(100), stop=D(90),
-        config=RiskConfig(starting_cash=D(1000), risk_fraction=D(".1"),
-                          allocation_fraction=D(1)),
-        execution=ExecutionConfig(slippage_bps=D(0), fee_per_order=D(1)))
-    assert decision.quantity == 9
-    assert decision.planned_risk == D(92)
+def test_faith_drawdown_examples_recovery_and_year_reset() -> None:
+    sizing = SizingCapital(D(1000000))
+    sizing.observe(AT, D(1000000))
+    sizing.observe(AT, D(900000))
+    assert sizing.capital == 800000
+    sizing.observe(AT, D(820000))
+    assert sizing.capital == 640000
+    sizing.observe(AT, D(1000000))
+    assert sizing.capital == 1000000
+    sizing.observe(AT.replace(year=2027), D(1200000))
+    assert sizing.capital == sizing.baseline == 1200000
 
 
-def test_daily_loss_latches_through_recovery_and_resets_at_new_york_midnight():
-    guard = DailyLossGuard(RiskConfig())
-    ny = ZoneInfo("America/New_York")
-    guard.roll_day(datetime(2025, 1, 2, 23, 59, tzinfo=ny), D(25000))
-    assert guard.observe(D(24500))
-    assert guard.observe(D(26000))
-    guard.roll_day(datetime(2025, 1, 3, 0, 0, tzinfo=ny), D(26000))
-    assert not guard.latched
-    assert guard.baseline == D(26000)
+def test_drawdown_gap_multiple_thresholds_and_insolvency() -> None:
+    sizing = SizingCapital(D(1000000))
+    sizing.observe(AT, D(1000000))
+    sizing.observe(AT, D(820000))
+    assert sizing.capital == 640000
+    sizing.observe(AT, D(-1))
+    assert sizing.capital == 0
+
+
+def test_drawdown_beyond_geometric_threshold_limit_clamps_without_looping() -> None:
+    sizing = SizingCapital(D(1000000))
+    sizing.observe(AT, D(1000000))
+    sizing.observe(AT, D(400000))
+    assert sizing.capital == 0
+    sizing.observe(AT, D(1000000))
+    assert sizing.capital == 1000000
+
+
+def test_1n_unit_sizing_not_stop_risk_sizing() -> None:
+    assert unit_shares(D(1000000), D(2), RiskConfig()) == 5000
+    assert unit_shares(D(10), D(100), RiskConfig()) == 0
+
+
+def test_limits_include_reserved_units_and_directions() -> None:
+    config = RiskConfig()
+    assert unit_limit_reason(config, "ABC", 1, [("ABC", 1)] * 4) == "symbol_unit_limit"
+    assert unit_limit_reason(config, "ABC", 1, [("XYZ", 1)] * 6) == "close_correlation_limit"
+    assert unit_limit_reason(config, "ABC", -1, [("XYZ", 1)] * 12) is None
+    groups = RiskConfig(close_groups=(("ABC",), ("XYZ",)),
+                        loose_groups=(("ABC",), ("XYZ",)))
+    assert unit_limit_reason(groups, "ABC", 1, [("XYZ", 1)] * 12) == "direction_unit_limit"
+
+
+def test_groups_must_cover_dataset() -> None:
+    with pytest.raises(ValueError, match="cover exactly"):
+        validate_groups(RiskConfig(close_groups=(("ABC",),)), {"ABC", "XYZ"})

@@ -189,3 +189,19 @@ def test_json_formatter_redacts_credentials() -> None:
     assert "abc" not in output
     assert "secret-value" not in output
     assert "order-1" in output
+
+
+def test_short_campaign_pnl_and_partial_cover_fees() -> None:
+    summary = summarize_result({
+        "equity": [], "metrics": {"borrow_costs": Decimal("1.25")},
+        "fills": [
+            {"symbol": "XYZ", "side": "sell", "quantity": 4, "price": 20, "fee": 4},
+            {"symbol": "XYZ", "side": "buy", "quantity": 2, "price": 15, "fee": 2},
+            {"symbol": "XYZ", "side": "buy", "quantity": 2, "price": 17, "fee": 2},
+        ],
+    })
+    assert summary["realized_pnl"] == 8
+    assert summary["closed_trade_count"] == 1
+    assert summary["win_rate"] == 1
+    assert summary["fees"] == 8
+    assert summary["borrow_costs"] == 1.25

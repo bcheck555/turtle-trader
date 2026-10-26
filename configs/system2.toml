@@ -1,0 +1,14 @@
+# Canonical System 2 settings with documented equity adaptations.
+schema_version = 2
+
+[strategy]
+entry_strategy = "turtle_s2"
+exit_strategy = "turtle_channel"
+allow_short = false
+
+[risk]
+starting_cash = "25000"
+unit_fraction = "0.01"
+
+[execution]
+market_hours = "regular"

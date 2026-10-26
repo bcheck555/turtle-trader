@@ -78,6 +78,18 @@ class RunStore:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        # Inspect existing databases without opening a write transaction. In particular,
+        # do not stamp a legacy database with the new version or create tables in it.
+        if self.path.exists() and self.path.stat().st_size:
+            uri = self.path.resolve().as_uri() + "?mode=ro"
+            with closing(sqlite3.connect(uri, uri=True)) as existing:
+                version = existing.execute("PRAGMA user_version").fetchone()[0]
+                columns = existing.execute("PRAGMA table_info(runs)").fetchall()
+                if version != 2 or [row[1] for row in columns] != [
+                    "run_id", "kind", "config_json", "data_hash", "result_json",
+                    "source_hash", "created_at",
+                ]:
+                    raise ValueError("incompatible run database; choose a new version-2 database")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection, connection:
             connection.execute(
@@ -91,6 +103,7 @@ class RunStore:
                     created_at TEXT NOT NULL
                 )"""
             )
+            connection.execute("PRAGMA user_version = 2")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -118,6 +131,7 @@ class RunStore:
         if row is None:
             raise KeyError(f"unknown run_id: {run_id}")
         return {
+            "schema_version": 2,
             "run_id": row["run_id"], "kind": row["kind"],
             "config": _decode(json.loads(row["config_json"])), "data_hash": row["data_hash"],
             "result": _decode(json.loads(row["result_json"])),
