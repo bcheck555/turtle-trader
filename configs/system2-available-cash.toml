@@ -1,0 +1,17 @@
+# System 2 signals with one fully cash-funded long position per ticker.
+schema_version = 2
+
+[strategy]
+entry_strategy = "turtle_s2"
+exit_strategy = "turtle_channel"
+allow_short = false
+interval_minutes = 30
+
+[risk]
+starting_cash = "25000"
+position_sizing = "available_cash"
+max_units = 1
+
+[execution]
+market_hours = "regular"
+slippage_bps = "5"

@@ -77,7 +77,9 @@ def run_metadata(
         "canonical_deviations": deviations(config),
         "execution_assumptions": [
             "Equity adaptation; regular exchange sessions and cash-funded longs.",
-            "Weekly snapshots; campaign N and intended unit shares frozen at entry.",
+            ("Available-cash sizing; campaign N and intended unit shares frozen at entry."
+             if config.risk.position_sizing == "available_cash" else
+             "Weekly snapshots; campaign N and intended unit shares frozen at entry."),
             "OHLC ambiguity selects the lower closing-equity simulated path.",
             "Short availability, borrowing and margin are explicit research assumptions.",
         ],

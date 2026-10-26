@@ -50,6 +50,7 @@ nonfinite values and booleans used as numbers are rejected.
 | --- | --- | --- |
 | `starting_cash` | `"25000"` | Positive starting account cash. |
 | `unit_fraction` | `"0.01"` | Sizing-capital fraction represented by one 1N move. |
+| `position_sizing` | `"atr"` | Volatility units (`atr`) or maximum affordable whole shares at each new long entry (`available_cash`). |
 | `max_units` | `4` | Maximum units per symbol. |
 | `close_limit` | `6` | Same-direction units per close correlation group. |
 | `loose_limit` | `10` | Same-direction units per loose correlation group. |
@@ -63,6 +64,14 @@ Drawdowns immediately cap new campaigns' weekly share snapshots without resizing
 active campaigns. Sizing capital becomes zero at the geometric threshold limit.
 Annual baseline resets before new fills at the first observed opening of each
 year. No external cash flows are modeled.
+
+`available_cash` is an alternate, long-only sizing mode. Each new campaign uses
+available cash minus pending-order reservations, adverse slippage, and fees.
+It bypasses weekly volatility sizing and drawdown sizing-capital reductions;
+protective stops, cash checks, volume limits, and portfolio unit limits still apply.
+Use `max_units = 1` for one fully funded position without pyramiding. Pending
+partial orders retain their original quantity and can be canceled after an
+unaffordable gap, as in ATR mode. This mode is recorded as a canonical deviation.
 
 ## `[execution]`
 

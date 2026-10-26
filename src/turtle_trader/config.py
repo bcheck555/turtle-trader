@@ -23,6 +23,8 @@ class AppConfig:
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
             raise ValueError("configuration schema_version must be 2")
+        if self.risk.position_sizing == "available_cash" and self.strategy.allow_short:
+            raise ValueError("available_cash sizing requires long-only trading")
         if self.strategy.allow_short and (
             not self.execution.shortable_symbols or self.execution.borrow_rate is None
         ):

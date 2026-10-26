@@ -279,12 +279,18 @@ class _Replay:
         campaign = self.campaigns.get(symbol)
         new = campaign is None
         n = self.strategies[symbol].levels().n
+        price = self.broker.price(reference, "buy" if direction == 1 else "sell")
         quantity = (self.weekly_shares.get(symbol, 0) if campaign is None else campaign.shares)
         if campaign is None:
-            quantity = min(quantity, unit_shares(self.sizing.capital, decimal(n or 0),
-                                                 self.risk_config))
+            if self.risk_config.position_sizing == "available_cash":
+                budget = (self.portfolio.available_cash - self.reserved_cash()
+                          - self.config.fee_per_order)
+                quantity = max(0, int(budget / (price + self.config.fee_per_share)))
+            else:
+                quantity = min(quantity, unit_shares(self.sizing.capital, decimal(n or 0),
+                                                     self.risk_config))
         reason: str | None = None
-        if self.halted or self.sizing.capital <= 0:
+        if self.halted or (self.risk_config.position_sizing == "atr" and self.sizing.capital <= 0):
             reason = "account_halted"
         elif direction == -1 and (not self.strategy_config.allow_short
                                   or symbol not in self.config.shortable_symbols):
@@ -297,7 +303,6 @@ class _Replay:
                         for o in self.broker.get_open_orders()
                         if o.intent.intent == "open" and o.intent.unit_id not in keys)
         reason = reason or unit_limit_reason(self.risk_config, symbol, direction, occupied)
-        price = self.broker.price(reference, "buy" if direction == 1 else "sell")
         factor = Decimal(1) if direction == 1 else self.config.initial_short_collateral - 1
         required = quantity * (price * factor + self.config.fee_per_share)
         if required + self.config.fee_per_order > (
@@ -694,6 +699,8 @@ def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
                  _validate_only: bool = False) -> BacktestResult:
     """Run one selected entry/exit pair; warmup updates rules without actual fills."""
     price_basis = validate_price_basis(price_basis)
+    if risk_config.position_sizing == "available_cash" and strategy_config.allow_short:
+        raise ValueError("available_cash sizing requires long-only trading")
     for boundary in (trade_start, trade_end):
         if boundary is not None and boundary.utcoffset() is None:
             raise ValueError("trade boundaries must be timezone-aware")
@@ -745,8 +752,10 @@ def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
         replay.batch(batch, session_closes, daily)
     result = replay.finish()
     result.price_basis = price_basis
+    sizing_description = ("available-cash entry sizing"
+                          if risk_config.position_sizing == "available_cash" else "weekly sizing")
     result.research_warnings = research_warnings(price_basis) + [
-        "Equity adaptation: cash-funded longs, regular exchange sessions, weekly sizing; "
+        f"Equity adaptation: cash-funded longs, regular exchange sessions, {sizing_description}; "
         "OHLC paths and volume capacity are simulations, not tick execution."]
     if strategy_config.allow_short:
         result.research_warnings.append(

@@ -110,6 +110,63 @@ def test_whole_unaffordable_unit_rejected_without_shrinking() -> None:
     assert replay.result.rejections[0].reason == "insufficient_cash"
 
 
+def test_available_cash_entry_reserves_slippage_and_fees_and_ignores_atr_size() -> None:
+    execution = ExecutionConfig(slippage_bps=D(5), fee_per_share=D(".1"), fee_per_order=D(2))
+    replay = warmed(risk=RiskConfig(starting_cash=D(1000), position_sizing="available_cash",
+                                   max_units=1), execution=execution)
+    replay.weekly_shares["ABC"] = 0
+    replay.sizing.capital = D(0)
+    replay.path(candle(opening=105, high=105, low=105, close=105), True)
+    fill = replay.result.fills[0]
+    assert fill.quantity == 9
+    assert fill.price == D("105.0525")
+    assert replay.portfolio.cash == D("51.6275")
+    assert replay.portfolio.cash < fill.price + execution.fee_per_share
+    replay.path(candle(1, opening=110, high=110, low=110, close=110), True)
+    assert len(replay.result.fills) == 1
+
+
+def test_available_cash_respects_other_pending_orders_and_gap_cash_checks() -> None:
+    replay = warmed(risk=RiskConfig(starting_cash=D(1000), position_sizing="available_cash",
+                                   max_units=1), symbols={"ABC", "XYZ"})
+    replay.path(candle(opening=105, high=105, low=105, close=105, volume=3), True)
+    assert replay.pending("ABC", "open")[0].remaining == 6
+    replay.path(candle(opening=105, high=105, low=105, close=105, symbol="XYZ"), True)
+    assert not any(f.symbol == "XYZ" for f in replay.result.fills)
+    assert replay.portfolio.cash == D(685)
+    replay.path(candle(1, opening=200, high=200, low=200, close=200), True)
+    assert not replay.pending("ABC", "open")
+    assert replay.portfolio.cash >= 0
+    assert any(r.reason == "insufficient_cash" for r in replay.result.rejections)
+
+
+def test_available_cash_requires_long_only_through_config_and_engine() -> None:
+    from turtle_trader.config import AppConfig
+
+    risk = RiskConfig(position_sizing="available_cash")
+    with pytest.raises(ValueError, match="long-only"):
+        AppConfig(strategy=StrategyConfig(allow_short=True), risk=risk)
+    with pytest.raises(ValueError, match="long-only"):
+        run_backtest([], StrategyConfig(allow_short=True), risk, FREE)
+
+
+def test_available_cash_reports_actual_sizing_assumptions() -> None:
+    from turtle_trader.config import AppConfig
+    from turtle_trader.data import DataManifest, Dataset
+    from turtle_trader.sweep import run_metadata
+
+    config = AppConfig(risk=RiskConfig(position_sizing="available_cash"))
+    result = run_backtest([], config.strategy, config.risk, config.execution, FixtureCalendar())
+    assert any("available-cash entry sizing" in w for w in result.research_warnings)
+    assert not any("weekly sizing" in w for w in result.research_warnings)
+    manifest = DataManifest(feed="sip", interval_minutes=5, coverage="regular",
+                            adjustment="all", action_free=True, start_date=START.date(),
+                            end_date=START.date(), symbols=("ABC",))
+    data = Dataset([], manifest, "fixture", [])
+    assumptions = run_metadata(config, data, None, None)["execution_assumptions"]
+    assert any("Available-cash sizing" in text for text in assumptions)
+
+
 def test_remainder_rechecked_after_gap_without_silent_resize() -> None:
     replay = warmed(risk=RiskConfig(starting_cash=D(1300)))
     replay.path(candle(opening=101.01, high=101.01, low=101.01, close=101.01, volume=3), True)

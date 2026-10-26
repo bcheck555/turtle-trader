@@ -96,8 +96,11 @@ class RiskConfig:
     direction_limit: int = 12
     close_groups: tuple[tuple[str, ...], ...] = ()
     loose_groups: tuple[tuple[str, ...], ...] = ()
+    position_sizing: Literal["atr", "available_cash"] = "atr"
 
     def __post_init__(self) -> None:
+        if self.position_sizing not in ("atr", "available_cash"):
+            raise ValueError("position_sizing must be atr or available_cash")
         _decimal(self.starting_cash, "starting_cash", positive=True)
         _decimal(self.unit_fraction, "unit_fraction", positive=True)
         if self.unit_fraction > 1:

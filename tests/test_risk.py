@@ -46,6 +46,16 @@ def test_1n_unit_sizing_not_stop_risk_sizing() -> None:
     assert unit_shares(D(10), D(100), RiskConfig()) == 0
 
 
+def test_position_sizing_configuration_is_explicit_and_validated() -> None:
+    from turtle_trader.config import deviations, load_config
+
+    config = load_config(overrides=['risk.position_sizing="available_cash"', 'risk.max_units=1'])
+    assert config.risk.position_sizing == "available_cash"
+    assert any("position_sizing" in change for change in deviations(config))
+    with pytest.raises(ValueError, match="position_sizing"):
+        load_config(overrides=['risk.position_sizing="all_in"'])
+
+
 def test_limits_include_reserved_units_and_directions() -> None:
     config = RiskConfig()
     assert unit_limit_reason(config, "ABC", 1, [("ABC", 1)] * 4) == "symbol_unit_limit"
