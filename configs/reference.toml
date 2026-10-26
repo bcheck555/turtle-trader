@@ -1,3 +1,5 @@
+# Revelio daily schedule with extended-hours execution.
+# Settings and defaults: ../docs/configuration.md
 [strategy]
 entry_length = 20
 exit_length = 10

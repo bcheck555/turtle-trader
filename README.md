@@ -55,6 +55,12 @@ risk decisions, rejections, and cancellations produced by the offline engine.
 Metadata includes engine version and config/data/source SHA-256 hashes; the
 committed lockfile captures dependency versions. No random model is used.
 
+## Configuration
+
+See the [configuration reference](docs/configuration.md) for every TOML setting,
+its default, valid values, units, and how the supplied presets differ. Omitted
+settings use built-in defaults; presets do not inherit from one another.
+
 ## Data format
 
 CSV columns: `symbol,timestamp,open,high,low,close,volume`. Timestamps identify bar

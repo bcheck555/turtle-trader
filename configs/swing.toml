@@ -1,3 +1,5 @@
+# Revelio overnight holdings with regular-hours execution.
+# Omitted settings use built-in defaults; see ../docs/configuration.md.
 [strategy]
 day_trading = false
 interval_minutes = 5
