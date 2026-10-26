@@ -19,7 +19,7 @@ import httpx
 from turtle_trader import __version__
 from turtle_trader.alpaca import DownloadRequest, DownloadResult, download_alpaca
 from turtle_trader.backtest import run_backtest
-from turtle_trader.config import load_config
+from turtle_trader.config import AppConfig, load_config
 from turtle_trader.data import Dataset, load_dataset
 from turtle_trader.persistence import RunStore
 from turtle_trader.reporting import (
@@ -28,7 +28,7 @@ from turtle_trader.reporting import (
     jsonable,
     summarize_result,
 )
-from turtle_trader.research import research_warnings
+from turtle_trader.research import research_warnings, strategy_warnings
 from turtle_trader.strategy import Strategy
 
 
@@ -82,16 +82,23 @@ def _benchmark(path: Path | None) -> list[tuple[datetime, Decimal]] | None:
     return points
 
 
-def _replay(data: Dataset, config: Any) -> dict[str, Any]:
+def _strategy_identity(config: AppConfig) -> dict[str, Any]:
+    return {"exit_strategy": config.strategy.exit_strategy,
+            "strategy_settings": asdict(config.strategy),
+            "strategy_warnings": strategy_warnings(config.strategy.exit_strategy)}
+
+
+def _replay(data: Dataset, config: AppConfig) -> dict[str, Any]:
     strategies = {symbol: Strategy(config.strategy) for symbol in data.manifest.symbols}
     events = [strategies[bar.symbol].on_bar(bar) for bar in data.bars]
     return {"events": events, "warnings": data.warnings, "manifest": data.manifest,
+            **_strategy_identity(config),
             "price_basis": data.manifest.price_basis,
             "research_warnings": research_warnings(data.manifest.price_basis),
             "external_parity_verified": False}
 
 
-def _save(args: argparse.Namespace, kind: str, config: object, data: Dataset,
+def _save(args: argparse.Namespace, kind: str, config: AppConfig, data: Dataset,
           result: object) -> str:
     reference_hash = source_hash()
     config_hash = hashlib.sha256(
@@ -102,7 +109,8 @@ def _save(args: argparse.Namespace, kind: str, config: object, data: Dataset,
                            "data_sha256": data.data_hash, "source_sha256": reference_hash,
                            "execution": "offline", "external_parity_verified": False,
                            "price_basis": data.manifest.price_basis,
-                           "research_warnings": research_warnings(data.manifest.price_basis)}
+                           "research_warnings": research_warnings(data.manifest.price_basis),
+                           **_strategy_identity(config)}
     return RunStore(args.database).save(kind, config, data.data_hash, payload, reference_hash)
 
 
@@ -206,10 +214,12 @@ def _run(args: argparse.Namespace) -> object:
         raise ValueError("strategy interval must match dataset interval")
     if args.command == "validate":
         return {"bars": len(data.bars), "data_hash": data.data_hash, "warnings": data.warnings,
+                **_strategy_identity(config),
                 "price_basis": data.manifest.price_basis,
                 "research_warnings": research_warnings(data.manifest.price_basis)}
     if args.command == "import":
         import_result = {"bars": data.bars, "manifest": data.manifest, "warnings": data.warnings,
+                         **_strategy_identity(config),
                          "price_basis": data.manifest.price_basis,
                          "research_warnings": research_warnings(data.manifest.price_basis)}
         return {"run_id": _save(args, "import", config, data, import_result)}

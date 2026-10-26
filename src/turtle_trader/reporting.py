@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -12,11 +12,18 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .research import ADJUSTED_RESEARCH_WARNING, PriceBasis, validate_price_basis
+from .research import (
+    ADJUSTED_RESEARCH_WARNING,
+    PriceBasis,
+    validate_price_basis,
+)
+from .research import strategy_warnings as configured_strategy_warnings
+
+_MISSING = object()
 
 
 def _get(value: Any, name: str, default: Any = None) -> Any:
-    return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+    return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
 
 
 def _number(value: Any) -> float | None:
@@ -69,18 +76,31 @@ def jsonable(value: object) -> Any:
 
 
 def _run_result(value: Any) -> Any:
-    """Unwrap RunStore.load output while leaving ordinary result mappings alone."""
-    if isinstance(value, dict) and "run_id" in value and "result" in value:
-        return value["result"]
-    return value
+    """Unwrap RunStore and CLI save wrappers, leaving result records intact."""
+    return _run_layers(value)[-1]
+
+
+def _run_layers(value: Any) -> list[Any]:
+    layers = [value]
+    current = value
+    while isinstance(current, Mapping) and "result" in current:
+        is_run = "run_id" in current
+        is_saved_payload = "metadata" in current
+        if not (is_run or is_saved_payload):
+            break
+        current = current["result"]
+        layers.append(current)
+    return layers
 
 
 def _research_metadata(value: Any) -> tuple[PriceBasis, list[str]]:
-    source = _run_result(value)
     bases: set[PriceBasis] = set()
     warnings: list[str] = []
-    for container in (source, _get(source, "metadata", {}), _get(source, "manifest", {}),
-                      value, _get(value, "metadata", {}), _get(value, "config", {})):
+    containers: list[Any] = []
+    for layer in _run_layers(value):
+        containers.extend((layer, _get(layer, "metadata", {}), _get(layer, "manifest", {}),
+                           _get(layer, "config", {})))
+    for container in containers:
         raw_basis = _get(container, "price_basis")
         if raw_basis is not None:
             bases.add(validate_price_basis(raw_basis))
@@ -98,6 +118,122 @@ def _research_metadata(value: Any) -> tuple[PriceBasis, list[str]]:
     if basis == "adjusted_research" and ADJUSTED_RESEARCH_WARNING not in warnings:
         warnings.append(ADJUSTED_RESEARCH_WARNING)
     return basis, warnings
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any] | None:
+    if is_dataclass(value) and not isinstance(value, type):
+        return asdict(value)
+    if isinstance(value, Mapping):
+        return value
+    return None
+
+
+def _valid_strategy_setting(value: Any) -> bool:
+    if value is None or isinstance(value, (str, bool, int, Decimal, Path, Enum)):
+        return not isinstance(value, Decimal) or value.is_finite()
+    if isinstance(value, float):
+        return _number(value) is not None
+    if isinstance(value, (list, tuple)):
+        return all(_valid_strategy_setting(item) for item in value)
+    if isinstance(value, Mapping):
+        return all(
+            isinstance(key, str) and _valid_strategy_setting(item)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _strategy_identity(value: Any) -> tuple[str, dict[str, Any], list[str]]:
+    """Resolve strategy identity across result, metadata, and stored config."""
+    layers = _run_layers(value)
+    containers: list[Any] = []
+    configs: list[Any] = []
+    for layer in layers:
+        containers.extend((layer, _get(layer, "metadata", {}), _get(layer, "manifest", {})))
+        config = _get(layer, "config", _MISSING)
+        if config is not _MISSING:
+            configs.append(config)
+            containers.append(config)
+            containers.append(_get(config, "metadata", {}))
+
+    selectors: list[Any] = []
+    setting_sources: list[Mapping[str, Any]] = []
+    warnings: list[str] = []
+    for container in containers:
+        selector = _get(container, "exit_strategy", _MISSING)
+        if selector is not _MISSING:
+            selectors.append(selector)
+
+        settings = _get(container, "strategy_settings", _MISSING)
+        if settings is not _MISSING:
+            mapped = _as_mapping(settings)
+            if mapped is None:
+                raise ValueError("strategy_settings must be a mapping")
+            setting_sources.append(mapped)
+            if "exit_strategy" in mapped:
+                selectors.append(mapped["exit_strategy"])
+
+        strategy = _get(container, "strategy", _MISSING)
+        if strategy is not _MISSING:
+            mapped_strategy = _as_mapping(strategy)
+            if mapped_strategy is None:
+                raise ValueError("stored strategy config must be a mapping")
+            setting_sources.append(mapped_strategy)
+            if "exit_strategy" in mapped_strategy:
+                selectors.append(mapped_strategy["exit_strategy"])
+
+        if any(container is config for config in configs):
+            mapped_config = _as_mapping(container)
+            if mapped_config is not None and (
+                "exit_strategy" in mapped_config
+                or any(key.startswith("chandelier_") for key in mapped_config)
+            ):
+                setting_sources.append(mapped_config)
+
+        raw_warnings = _get(container, "strategy_warnings", [])
+        if raw_warnings is None:
+            raw_warnings = []
+        if not isinstance(raw_warnings, (list, tuple)) or any(
+            not isinstance(warning, str) for warning in raw_warnings
+        ):
+            raise ValueError("strategy_warnings must be a list of strings")
+        for warning in raw_warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+
+    if any(not isinstance(selector, str) or selector not in ("revelio", "chandelier")
+           for selector in selectors):
+        raise ValueError("exit_strategy must be revelio or chandelier")
+    if len(set(selectors)) > 1:
+        raise ValueError("conflicting exit_strategy metadata")
+    exit_strategy = selectors[0] if selectors else "revelio"
+
+    merged_settings: dict[str, Any] = {}
+    for candidate in setting_sources:
+        for key, setting in candidate.items():
+            if not isinstance(key, str) or not _valid_strategy_setting(setting):
+                raise ValueError("strategy_settings contains an invalid setting")
+            if key in merged_settings and merged_settings[key] != setting:
+                raise ValueError(f"conflicting strategy setting: {key}")
+            merged_settings[key] = setting
+    if "exit_strategy" in merged_settings and merged_settings["exit_strategy"] != exit_strategy:
+        raise ValueError("conflicting exit_strategy metadata")
+    for name in ("chandelier_length", "chandelier_atr_length"):
+        if name in merged_settings and type(merged_settings[name]) is not int:
+            raise ValueError(f"{name} must be an integer")
+    if ("chandelier_multiple" in merged_settings
+            and type(merged_settings["chandelier_multiple"]) not in (int, float)):
+        raise ValueError("chandelier_multiple must be numeric")
+    if ("chandelier_ratchet" in merged_settings
+            and type(merged_settings["chandelier_ratchet"]) is not bool):
+        raise ValueError("chandelier_ratchet must be boolean")
+    if ("chandelier_timeframe" in merged_settings
+            and merged_settings["chandelier_timeframe"] not in ("session", "intraday")):
+        raise ValueError("chandelier_timeframe must be session or intraday")
+    for warning in configured_strategy_warnings(exit_strategy):
+        if warning not in warnings:
+            warnings.append(warning)
+    return exit_strategy, merged_settings, warnings
 
 
 def _benchmark_return(benchmark: Iterable[Any], start: Any, end: Any) -> float | None:
@@ -168,6 +304,7 @@ def summarize_result(result: Any, benchmark: Iterable[Any] | None = None) -> dic
     status reports whether they matched. Undefined ratios are ``None``.
     """
     price_basis, warnings = _research_metadata(result)
+    exit_strategy, strategy_settings, strategy_warnings = _strategy_identity(result)
     result = _run_result(result)
     equity_points = list(_get(result, "equity", []) or [])
     fills = list(_get(result, "fills", []) or [])
@@ -239,6 +376,9 @@ def summarize_result(result: Any, benchmark: Iterable[Any] | None = None) -> dic
         if returns is not None and benchmark_result is not None else None,
         "price_basis": price_basis,
         "research_warnings": warnings,
+        "exit_strategy": exit_strategy,
+        "strategy_settings": _jsonable(strategy_settings),
+        "strategy_warnings": strategy_warnings,
     }
 
 
@@ -249,9 +389,13 @@ def export_report_json(
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
     price_basis, warnings = _research_metadata(result)
+    exit_strategy, strategy_settings, strategy_warnings = _strategy_identity(result)
     payload = {
         "price_basis": price_basis,
         "research_warnings": warnings,
+        "exit_strategy": exit_strategy,
+        "strategy_settings": _jsonable(strategy_settings),
+        "strategy_warnings": strategy_warnings,
         "summary": summarize_result(result, benchmark),
         "result": _jsonable(result),
     }
@@ -268,6 +412,9 @@ def export_report_csv(result: Any, path: str | Path) -> Path:
     output.parent.mkdir(parents=True, exist_ok=True)
     source = _run_result(result)
     price_basis, warnings = _research_metadata(result)
+    exit_strategy, strategy_settings, strategy_warnings = _strategy_identity(result)
+    strategy_settings_json = json.dumps(_jsonable(strategy_settings), separators=(",", ":"))
+    strategy_warnings_json = json.dumps(strategy_warnings, separators=(",", ":"))
     rows: list[dict[str, Any]] = []
     for kind in ("equity", "fills"):
         for item in _get(source, kind, []) or []:
@@ -276,6 +423,9 @@ def export_report_csv(result: Any, path: str | Path) -> Path:
                 "record_type": "fill" if kind == "fills" else "equity",
                 "price_basis": price_basis,
                 "research_warnings": json.dumps(warnings, separators=(",", ":")),
+                "exit_strategy": exit_strategy,
+                "strategy_settings": strategy_settings_json,
+                "strategy_warnings": strategy_warnings_json,
                 **row,
             })
     if not rows:
@@ -283,6 +433,9 @@ def export_report_csv(result: Any, path: str | Path) -> Path:
             "record_type": "metadata",
             "price_basis": price_basis,
             "research_warnings": json.dumps(warnings, separators=(",", ":")),
+            "exit_strategy": exit_strategy,
+            "strategy_settings": strategy_settings_json,
+            "strategy_warnings": strategy_warnings_json,
         })
     columns = sorted({key for row in rows for key in row} | {"record_type"})
     with output.open("w", newline="", encoding="utf-8") as handle:

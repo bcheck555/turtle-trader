@@ -9,7 +9,7 @@ liquidity at the open cannot be inferred from OHLCV. Intrabar fill timestamps
 identify the candle, not a reconstructed tick time.
 """
 
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from itertools import groupby
@@ -28,7 +28,7 @@ from .domain import (
 )
 from .execution import OfflineBroker, OrderState
 from .portfolio import Portfolio, Position
-from .research import PriceBasis, research_warnings, validate_price_basis
+from .research import PriceBasis, research_warnings, strategy_warnings, validate_price_basis
 from .risk import DailyLossGuard, size_entry
 from .strategy import Strategy
 
@@ -103,6 +103,9 @@ class BacktestResult:
     metrics: dict[str, Decimal | int | float | str] = field(default_factory=dict)
     price_basis: PriceBasis = "action_free"
     research_warnings: list[str] = field(default_factory=list)
+    exit_strategy: str = "revelio"
+    strategy_settings: dict[str, object] = field(default_factory=dict)
+    strategy_warnings: list[str] = field(default_factory=list)
 
 
 def decimal(value: float) -> Decimal:
@@ -292,14 +295,16 @@ class _Replay:
                 continue
             if event.held and event.active_stop is not None:
                 self.active_stops[bar.symbol] = decimal(event.active_stop)
-            if event.deadline is not None and (event.entry or event.reentry):
+            if (self.strategy_config.day_trading and event.deadline is not None
+                    and (event.entry or event.reentry)):
                 self.deadlines[bar.symbol] = event.deadline
             if (event.entry or event.reentry) and not event.held:
                 self.unexecutable += 1
                 self.result.rejections.append(Rejection(
                     event.known_at, bar.symbol, "reference_round_trip_unexecutable"))
             if not event.held:
-                self.exit(bar.symbol, event.known_at, event.known_at, "strategy_exit")
+                self.exit(bar.symbol, event.known_at, event.known_at,
+                          event.exit_reason or "strategy_exit")
             else:
                 position = self.portfolio.positions.get(bar.symbol)
                 if position and event.active_stop is not None:
@@ -412,4 +417,7 @@ def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
     result = replay.finish()
     result.price_basis = price_basis
     result.research_warnings = research_warnings(price_basis)
+    result.exit_strategy = strategy_config.exit_strategy
+    result.strategy_settings = asdict(strategy_config)
+    result.strategy_warnings = strategy_warnings(strategy_config.exit_strategy)
     return result

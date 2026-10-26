@@ -5,6 +5,7 @@ An explicit Alpaca command downloads historical market data. No brokerage order
 connection or live execution module is included.
 
 The supplied Revelio Pine indicator is translated into a reference state machine.
+Revelio remains the default exit; a configurable Chandelier alternative is available.
 Parity against exported TradingView observations is not independently verified. An
 indicator signal is a research event; it is not an executable fill or a promise
 of profit. Backtest results depend on supplied data and execution assumptions.
@@ -129,6 +130,21 @@ provenance. All automated tests mock network access; no live API validation is
 performed during development.
 
 ## Strategy versus execution
+
+To use Chandelier with overnight holdings, pass `--config configs/chandelier-swing.toml`
+to `replay`, `backtest` or `walk-forward`. Defaults are a 22-session highest high
+minus 3 × Wilder ATR(22), ratcheted upward during the underlying signal. The fixed
+initial stop remains a floor; the 10-session exit band is ignored in this mode.
+Set `chandelier_timeframe="intraday"` to use completed input candles, or
+`chandelier_ratchet=false` for the raw line that can rise or fall. Existing settings
+for initial-stop ATR, breakout entries and portfolio risk remain separate.
+
+A current candle is tested against its incoming stop. Its confirmed high/range
+can update only the subsequent stop. If that replacement is already above the
+closing price, the system emits `new_stop_close_breach` and exits any actual holding
+at the next eligible opening. No same-candle fill at the newly calculated stop is
+invented. Chandelier results are labeled as a derived strategy without Revelio
+Pine parity. See [Chandelier details](docs/chandelier-exit.md).
 
 Reference replay preserves confirmed-bar events and retrospective marker prices.
 The indicator has no execution or PnL model. Causal simulation fills new orders at

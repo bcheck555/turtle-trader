@@ -1,0 +1,13 @@
+[strategy]
+day_trading = false
+interval_minutes = 5
+exit_strategy = "chandelier"
+chandelier_timeframe = "session"
+chandelier_length = 22
+chandelier_atr_length = 22
+chandelier_multiple = 3.0
+chandelier_ratchet = true
+
+[execution]
+market_hours = "regular"
+slippage_bps = "5"

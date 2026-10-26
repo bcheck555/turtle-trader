@@ -10,6 +10,17 @@ ADJUSTED_RESEARCH_WARNING = (
     "does not support point-in-time claims, and may change when vendors apply future adjustments."
 )
 
+CHANDELIER_STRATEGY_WARNING = (
+    "Chandelier exit is a derived strategy and does not preserve Revelio Pine exit behavior."
+)
+
+
+def strategy_warnings(exit_strategy: str) -> list[str]:
+    """Describe an explicitly selected alternative to the reference exit."""
+    if exit_strategy not in ("revelio", "chandelier"):
+        raise ValueError("exit_strategy must be revelio or chandelier")
+    return [CHANDELIER_STRATEGY_WARNING] if exit_strategy == "chandelier" else []
+
 
 def validate_price_basis(value: str) -> PriceBasis:
     """Return a recognized price-basis label or reject it."""

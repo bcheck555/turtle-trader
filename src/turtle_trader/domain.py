@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+from math import isfinite
 from typing import Literal
 
 
@@ -30,8 +31,32 @@ class StrategyConfig:
     close_minute: int = 30
     open_hour: int = 18
     open_minute: int = 0
+    exit_strategy: Literal["revelio", "chandelier"] = "revelio"
+    chandelier_timeframe: Literal["session", "intraday"] = "session"
+    chandelier_length: int = 22
+    chandelier_atr_length: int = 22
+    chandelier_multiple: float = 3.0
+    chandelier_ratchet: bool = True
 
     def __post_init__(self) -> None:
+        if self.exit_strategy not in ("revelio", "chandelier"):
+            raise ValueError("exit_strategy must be revelio or chandelier")
+        if self.chandelier_timeframe not in ("session", "intraday"):
+            raise ValueError("chandelier_timeframe must be session or intraday")
+        if any(type(n) is not int or not 2 <= n <= 400 for n in (
+            self.chandelier_length, self.chandelier_atr_length
+        )):
+            raise ValueError("Chandelier lengths must be integers in 2..400")
+        if type(self.chandelier_multiple) not in (int, float):
+            raise ValueError("chandelier_multiple must be finite and positive")
+        try:
+            valid_multiple = isfinite(self.chandelier_multiple) and self.chandelier_multiple > 0
+        except OverflowError:
+            valid_multiple = False
+        if not valid_multiple:
+            raise ValueError("chandelier_multiple must be finite and positive")
+        if type(self.chandelier_ratchet) is not bool:
+            raise ValueError("chandelier_ratchet must be boolean")
         if any(not 2 <= n <= 400 for n in (
             self.entry_length, self.exit_length, self.atr_length
         )):
@@ -74,6 +99,13 @@ class StrategyEvents:
     shade_held: bool = False
     deadline: datetime | None = None
     exit_while_flat: bool = False
+    exit_strategy: Literal["revelio", "chandelier"] = "revelio"
+    chandelier_level: float | None = None
+    chandelier_stop: float | None = None
+    stop_used: float | None = None
+    proposed_stop: float | None = None
+    chandelier_atr: float | None = None
+    exit_reason: str | None = None
 
 
 @dataclass(frozen=True)

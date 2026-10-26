@@ -57,6 +57,14 @@ Display marks are reference events and never booked directly into portfolio cash
 
 ## Execution and future broker boundary
 
+The default exit path preserves Revelio behavior. Selecting Chandelier activates
+an independent rolling-high/Wilder ATR component and per-signal ratchet. Current
+candle exits use the incoming published threshold; new thresholds are published
+after confirmation. A newly raised threshold above close ends the signal at
+confirmation and queues causal execution for the next eligible opening. Event
+diagnostics distinguish the tested and proposed stops. Initial-stop risk formulas
+are shared unchanged. See [Chandelier specification](chandelier-exit.md).
+
 Timestamp batches apply opening marks/loss gate, scheduled and protective exits,
 pending sells, pending buys, intrabar stops, then closing marks/confirmed decisions.
 Alphabetical symbol priority resolves simultaneous competition for capital. Bars
