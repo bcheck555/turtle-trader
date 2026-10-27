@@ -1,21 +1,24 @@
-"""Streaming exchange coverage accounting; absent slots have unknown cause.
+"""Streaming exchange coverage accounting with sourced market-wide pauses.
 
 Provider omissions cannot establish whether a slot had no trades, a halt, or
-missing vendor data. This report records gaps without manufacturing candles.
+missing vendor data. Verified whole-bar halt intervals are reported separately;
+other absent slots remain unknown. No candles are manufactured.
 """
 
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 from zoneinfo import ZoneInfo
 
 from turtle_trader.domain import Bar
+from turtle_trader.halts import fully_halted
 
 if TYPE_CHECKING:
     from turtle_trader.data import DataManifest, ExchangeCalendar
 
 NY = ZoneInfo("America/New_York")
+RangeClassification = Literal["unknown", "market_wide_halt"]
 
 
 @dataclass(frozen=True)
@@ -23,7 +26,7 @@ class MissingRange:
     start: datetime
     end: datetime
     count: int
-    classification: Literal["unknown"] = "unknown"
+    classification: RangeClassification = "unknown"
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,8 @@ class SessionCoverage:
     observed_count: int
     missing_count: int
     missing_ranges: list[MissingRange]
+    halted_count: int = 0
+    halted_ranges: list[MissingRange] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,7 @@ class CoverageReport:
     outside_count: int
     absent_symbols: list[str]
     sessions: list[SessionCoverage]
+    halted_count: int = 0
 
     @property
     def complete(self) -> bool:
@@ -65,20 +71,26 @@ def _ordered_bars(bars: Iterable[Bar]) -> Iterator[Bar]:
 
 def _missing_ranges(
     expected: list[datetime], observed: set[datetime], delta: timedelta,
+    *, classification: RangeClassification = "unknown",
 ) -> list[MissingRange]:
     result: list[MissingRange] = []
     start: datetime | None = None
+    end: datetime | None = None
     count = 0
     for at in expected:
         if at not in observed:
+            if start is not None and end is not None and at != end:
+                result.append(MissingRange(start, end, count, classification))
+                start, count = None, 0
             if start is None:
                 start = at
+            end = at + delta
             count += 1
-        elif start is not None:
-            result.append(MissingRange(start, at, count))
+        elif start is not None and end is not None:
+            result.append(MissingRange(start, end, count, classification))
             start, count = None, 0
-    if start is not None:
-        result.append(MissingRange(start, expected[-1] + delta, count))
+    if start is not None and end is not None:
+        result.append(MissingRange(start, end, count, classification))
     return result
 
 
@@ -91,6 +103,9 @@ def coverage_report(
     Per-session observed counts count eligible slots only. Missing ranges are
     half-open UTC intervals. Synthetic custom coverage has no inferred grid:
     its expected count equals eligible observed count and no gaps are inferred.
+    Calendars opting into market halts exclude only fully halted bars; those
+    exclusions are reported in separate counts and ranges. Partial halt-boundary
+    bars remain required. Injected calendars retain their own trading schedule.
     """
     if calendar is None and manifest.coverage != "custom":
         from turtle_trader.data import ExchangeCalendar
@@ -100,17 +115,21 @@ def coverage_report(
     iterator = iter(_ordered_bars(bars))
     current = next(iterator, None)
     symbols_seen: set[str] = set()
-    observed_count = outside_count = expected_count = missing_count = 0
+    observed_count = outside_count = expected_count = missing_count = halted_count = 0
     sessions: list[SessionCoverage] = []
     day = manifest.start_date
     while day <= manifest.end_date:
         expected: list[datetime] = []
+        halted: list[datetime] = []
         if calendar is not None and manifest.coverage != "custom":
             bounds = calendar.bounds(day, manifest.coverage)
             if bounds is not None:
                 at = bounds[0].astimezone(UTC)
                 while at + delta <= bounds[1]:
-                    expected.append(at)
+                    if getattr(calendar, "market_halts", False) and fully_halted(at, delta):
+                        halted.append(at)
+                    else:
+                        expected.append(at)
                     at += delta
         expected_set = set(expected)
         observed: dict[str, set[datetime]] = {}
@@ -145,11 +164,16 @@ def coverage_report(
                 ranges = _missing_ranges(expected, symbol_observed, delta)
                 count = len(expected)
             missing = sum(value.count for value in ranges)
+            halt_ranges = _missing_ranges(
+                halted, set(), delta, classification="market_wide_halt",
+            )
             sessions.append(SessionCoverage(
                 day, symbol, count, len(symbol_observed), missing, ranges,
+                len(halted), halt_ranges,
             ))
             expected_count += count
             missing_count += missing
+            halted_count += len(halted)
         day += timedelta(days=1)
     while current is not None:
         observed_count += 1
@@ -159,4 +183,5 @@ def coverage_report(
     return CoverageReport(
         expected_count, observed_count, missing_count, outside_count,
         [symbol for symbol in manifest.symbols if symbol not in symbols_seen], sessions,
+        halted_count,
     )

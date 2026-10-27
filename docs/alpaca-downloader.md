@@ -28,7 +28,8 @@ Completed acquisition publishes four files in a new destination directory:
 
 - `bars.csv`: canonical columns, UTC opening timestamps, timestamp/symbol order.
 - `manifest.toml`: importer-compatible dates, symbols, coverage and research basis.
-- `coverage.json`: expected/observed counts, absent symbols and missing ranges.
+- `coverage.json`: expected tradable/observed counts, absent symbols, unknown
+  missing ranges and separately reported verified halt counts/ranges.
 - `provenance.json`: request parameters, timestamps, page/row counts, dependency
   versions, artifact checksums, exclusions, warnings and readiness status.
 
@@ -44,6 +45,10 @@ Alpaca can omit intervals without qualifying trades. An absent candle is therefo
 an unclassified gap, not proof of an outage or inactivity. The strict calendar grid
 may reject legitimate sparse data, particularly extended hours or single-venue IEX.
 Do not replace such bars with fabricated flat OHLCV records.
+
+[Verified market-wide pauses](market-halts.md) remove only wholly halted slots
+from the expected grid. Partially tradable boundary bars remain required. This
+does not exempt unknown gaps or silently accept arbitrary absent candles.
 
 Downloader exports deliberately use `price_basis="adjusted_research"`, full
 adjustments and `action_free=false`. The latter means absence of corporate actions

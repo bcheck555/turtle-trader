@@ -6,6 +6,7 @@ import math
 import tomllib
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -33,13 +34,19 @@ class HistoricalProvider(Protocol):
 class ExchangeCalendar:
     """XNYS holidays/early closes; extended early-close days end conservatively at close."""
 
+    market_halts = True
+
     def __init__(self, start: date | None = None, end: date | None = None) -> None:
         self._calendar = xcals.get_calendar(
             "XNYS", start=str((start or date(1990, 1, 1)) - timedelta(days=7)),
             end=str((end or date(2040, 12, 31)) + timedelta(days=7))
         )
+        self._cached_bounds = lru_cache(maxsize=8192)(self._session_bounds)
 
     def bounds(self, day: date, market_hours: str) -> tuple[datetime, datetime] | None:
+        return self._cached_bounds(day, market_hours)
+
+    def _session_bounds(self, day: date, market_hours: str) -> tuple[datetime, datetime] | None:
         if market_hours not in ("regular", "extended"):
             raise ValueError("market_hours must be regular or extended")
         if not self._calendar.is_session(str(day)):
@@ -205,6 +212,11 @@ def load_dataset(csv_path: Path, manifest_path: Path, *, strict: bool = True) ->
     if manifest.coverage == "custom":
         warnings.append("Synthetic custom coverage: not a real-market performance dataset")
     else:
+        if report.halted_count:
+            warnings.append(
+                f"{report.halted_count} verified market-wide halt intervals excluded from "
+                "the expected candle grid; no candles fabricated (nyse-mwcb-2020-v1)"
+            )
         if report.outside_count:
             raise ValueError(f"{report.outside_count} candles outside declared exchange coverage")
         if report.missing_count:

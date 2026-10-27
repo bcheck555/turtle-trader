@@ -141,8 +141,10 @@ timestamp_convention = "bar_open"
 
 Strategy sessions use the regular exchange calendar, including early closes and
 daylight saving. Incomplete internal sessions are errors; partial boundary sessions
-are excluded. No candles are forward-filled. Missing bars do not establish whether
-a vendor outage, halt or no-trade interval occurred.
+are excluded. [Verified market-wide pauses](docs/market-halts.md) exempt only fully
+halted candle intervals, with separate coverage counts. Reopening fills use the
+next observed price and cannot precede the verified restart. No candles are
+forward-filled. Other missing bars remain unclassified and fail strict validation.
 
 Explicit `price_basis="adjusted_research"` with `adjustment="all"` and
 `action_free=false` accepts vendor-adjusted data without attesting action-free

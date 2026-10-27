@@ -46,6 +46,7 @@ def test_complete_generator_and_report_schema() -> None:
     assert asdict(report.sessions[0]) == {
         "day": date(2026, 1, 5), "symbol": "ABC", "expected_count": 78,
         "observed_count": 78, "missing_count": 0, "missing_ranges": [],
+        "halted_count": 0, "halted_ranges": [],
     }
 
 

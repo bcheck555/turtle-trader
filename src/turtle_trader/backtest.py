@@ -15,6 +15,7 @@ from typing import Literal, Protocol
 
 from .domain import Bar, ExecutionConfig, Fill, OrderIntent, RiskConfig, StrategyConfig
 from .execution import OfflineBroker, OrderState
+from .halts import MARKET_HALTS, POLICY_VERSION, fully_halted, next_tradable_at
 from .portfolio import Portfolio, Position
 from .research import PriceBasis, research_warnings, strategy_warnings, validate_price_basis
 from .risk import SizingCapital, unit_limit_reason, unit_shares, validate_groups
@@ -141,6 +142,7 @@ class _Replay:
         self.order_counter = self.campaign_counter = 0
         self.result = BacktestResult()
         self.trade_start, self.trade_end = trade_start, trade_end
+        self.market_halts = False
 
     def trading_at(self, at: datetime) -> bool:
         return ((self.trade_start is None or at >= self.trade_start)
@@ -575,11 +577,15 @@ class _Replay:
 
     def batch(self, bars: list[Bar], session_closes: dict[tuple[str, date], datetime],
               daily: dict[tuple[str, date], tuple[float, float, float]]) -> None:
-        self.before_batch(bars)
-        if any(self.can_transition(bar) for bar in bars):
+        # Keep original observation labels for indicator publication. Opening
+        # executions in a reopening candle cannot precede the verified restart.
+        execution_bars = ([replace(bar, time=next_tradable_at(bar.time)) for bar in bars]
+                          if self.market_halts else bars)
+        self.before_batch(execution_bars)
+        if any(self.can_transition(bar) for bar in execution_bars):
             first, second = self.fork(), self.fork()
-            first.batch_path(bars, True)
-            second.batch_path(bars, False)
+            first.batch_path(execution_bars, True)
+            second.batch_path(execution_bars, False)
             chosen = first if first.portfolio.equity <= second.portfolio.equity else second
             for bar in bars:
                 if ([f for f in first.result.fills if f.symbol == bar.symbol]
@@ -671,11 +677,12 @@ def _sessions(bars: list[Bar], calendar: Calendar, interval: int) -> tuple[
             bounds = bounds_method(day, "regular") if bounds_method else None
             if bounds_method and bounds is not None:
                 opening, closing = bounds
-                expected = int((closing - opening).total_seconds() // (interval * 60))
-                complete = (len(samples) == expected and samples[0].time == opening
-                            and samples[-1].time_close == closing
-                            and all(a.time_close == b.time for a, b in
-                                    zip(samples, samples[1:], strict=False)))
+                delta = timedelta(minutes=interval)
+                slots = int((closing - opening).total_seconds() // delta.total_seconds())
+                expected = [opening + i * delta for i in range(slots)
+                            if not getattr(calendar, "market_halts", False)
+                            or not fully_halted(opening + i * delta, delta)]
+                complete = [bar.time for bar in samples] == expected
                 if not complete:
                     if day not in (days[0], days[-1]):
                         raise ValueError(f"incomplete internal exchange session: {symbol} {day}")
@@ -737,6 +744,7 @@ def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
         raise ValueError("no complete regular exchange sessions remain after boundary exclusion")
     replay = _Replay(strategy_config, risk_config, execution_config, symbols,
                      trade_start, trade_end)
+    replay.market_halts = bool(getattr(calendar, "market_halts", False))
     previous_close: datetime | None = None
     for _, group in groupby(ordered, key=lambda b: b.time):
         batch = list(group)
@@ -757,6 +765,14 @@ def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
     result.research_warnings = research_warnings(price_basis) + [
         f"Equity adaptation: cash-funded longs, regular exchange sessions, {sizing_description}; "
         "OHLC paths and volume capacity are simulations, not tick execution."]
+    halt_days = {halt.start.date() for halt in MARKET_HALTS}
+    if replay.market_halts and any(bar.time.date() in halt_days for bar in ordered):
+        result.research_warnings.append(
+            f"Verified market-wide pauses ({POLICY_VERSION}): no fabricated halt candles; "
+            "reopening uses the next observed bar's opening price at no earlier than the "
+            "exchange restart. Restart timestamps are execution bounds, not observed "
+            "security trade times; coarse bars still leave intrabar ordering uncertain."
+        )
     if strategy_config.allow_short:
         result.research_warnings.append(
             "Short borrowing availability, rates, collateral and observed-mark margin checks "
