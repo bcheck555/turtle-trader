@@ -10,11 +10,12 @@ import time
 import uuid
 from dataclasses import fields
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 from turtle_trader import __version__
 from turtle_trader.backtest import BacktestResult, EquitySnapshot, run_backtest
-from turtle_trader.config import load_config, resolved_config
+from turtle_trader.config import AppConfig, load_config, resolved_config
 from turtle_trader.data import load_dataset
 from turtle_trader.domain import Fill
 from turtle_trader.reporting import jsonable, summarize_result
@@ -27,6 +28,26 @@ TRADE_START = datetime(2016, 5, 11, 13, 30, tzinfo=UTC)
 def checksum(path: Path) -> str:
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def research_config(exit_strategy: str, position_sizing: str = "available_cash",
+                    allow_short: bool = False, borrow_rate: Decimal | None = None) -> AppConfig:
+    """Keep legacy defaults; use the engine's supported ATR mode for shorts."""
+    if allow_short and position_sizing != "atr":
+        raise ValueError("shorts require ATR sizing; available_cash remains long-only")
+    if allow_short and borrow_rate is None:
+        raise ValueError("shorts require an explicit annual borrow rate")
+    overrides = [
+        "strategy.interval_minutes=1",
+        f'strategy.exit_strategy="{exit_strategy}"',
+        'strategy.chandelier_timeframe="session"',
+        f'risk.position_sizing="{position_sizing}"',
+        f"strategy.allow_short={str(allow_short).lower()}",
+    ]
+    if borrow_rate is not None:
+        overrides.extend(['execution.shortable_symbols=["QQQ"]',
+                          f'execution.borrow_rate="{borrow_rate}"'])
+    return load_config(ROOT / "configs/system2-available-cash.toml", overrides)
 
 
 def stream_result(result: BacktestResult, output: Path) -> None:
@@ -63,7 +84,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("exit_strategy", choices=("turtle_channel", "chandelier"))
     parser.add_argument("output", type=Path)
+    parser.add_argument("--position-sizing", choices=("available_cash", "atr"),
+                        default="available_cash")
+    parser.add_argument("--allow-short", action="store_true")
+    parser.add_argument("--borrow-rate", type=Decimal, help="annual fractional rate, e.g. 0.03")
     args = parser.parse_args()
+    config = research_config(args.exit_strategy, args.position_sizing,
+                             args.allow_short, args.borrow_rate)
     started = time.monotonic()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -75,11 +102,6 @@ def main() -> None:
         })
 
     status("loading")
-    config = load_config(ROOT / "configs/system2-available-cash.toml", (
-        "strategy.interval_minutes=1",
-        f'strategy.exit_strategy="{args.exit_strategy}"',
-        'strategy.chandelier_timeframe="session"',
-    ))
     atomic_json(output / "config.json", resolved_config(config))
     source = ROOT / "runs/qqq-1m-20160223-20261023"
     data = load_dataset(source / "bars.csv", source / "manifest.toml")
