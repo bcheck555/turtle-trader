@@ -145,8 +145,8 @@ function simulate(days, positions, start, end, costBps) {
     yearlyPct: Object.fromEntries(Object.entries(yearly).map(([y, v]) => [y, 100 * (v - 1)])) };
 }
 
-function research(csv) {
-  const days = loadDays(csv);
+function researchDays(days, dataSha256) {
+  if (days.length < 250) throw Error('Insufficient history');
   const start = 200;
   const split = days.findIndex(d => d.date >= '2025-01-01');
   if (split <= start || split >= days.length - 1) throw Error('Invalid holdout');
@@ -178,7 +178,7 @@ function research(csv) {
         meanOvernightBps: selected.reduce((s, d) => s + d.overnight, 0) / selected.length * 10000 };
     }
   }
-  return { dataSha256: crypto.createHash('sha256').update(csv).digest('hex'),
+  return { dataSha256,
     dataStart: days[0].date, dataEnd: days.at(-1).date, sessions: days.length,
     windows: Object.fromEntries(Object.entries(windows).map(([k, [a, b]]) =>
       [k, { start: days[a].date, end: days[b - 1].date, sessions: b - a }])),
@@ -186,7 +186,11 @@ function research(csv) {
     discoverySelected: ranked[0].name, strategyCount: specs.length - 1, patterns, rows };
 }
 
-module.exports = { loadDays, targets, simulate, research, specs };
+function research(csv) {
+  return researchDays(loadDays(csv), crypto.createHash('sha256').update(csv).digest('hex'));
+}
+
+module.exports = { loadDays, targets, simulate, research, researchDays, specs };
 if (require.main === module) {
   const file = process.argv[2] || path.join(__dirname,
     '../runs/turtle-trader-equity-5y-20261026/qqq/bars.csv');
