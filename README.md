@@ -77,6 +77,11 @@ configurations and report/database formats are rejected rather than reinterprete
 
 See [configuration](docs/configuration.md) for all settings and presets.
 
+An independent [Squeeze Momentum strategy](docs/squeeze-momentum.md) adds
+LazyBear-style signals, optional ADX/WMA filters, and fixed ATR brackets. Use
+`configs/squeeze-momentum.toml` with 30-minute data, or run the documented cached
+QQQ comparison. Its signal timing and cash-capped sizing differ from Turtle rules.
+
 ## Rules and execution
 
 System 2 uses 55-session entry and opposite 20-session exit channels. System 1

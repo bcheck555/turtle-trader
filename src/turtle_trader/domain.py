@@ -53,6 +53,20 @@ class StrategyConfig:
     chandelier_atr_length: int = 22
     chandelier_multiple: float = 3.0
     chandelier_ratchet: bool = True
+    squeeze_bb_length: int = 20
+    squeeze_bb_multiple: float = 2.0
+    squeeze_kc_length: int = 20
+    squeeze_kc_multiple: float = 1.5
+    squeeze_momentum_length: int = 20
+    squeeze_adx_length: int = 14
+    squeeze_adx_smoothing: int = 14
+    squeeze_adx_threshold: float = 20.0
+    squeeze_use_adx: bool = True
+    squeeze_wma_length: int = 120
+    squeeze_use_wma: bool = True
+    squeeze_atr_length: int = 14
+    squeeze_target_multiple: float = 3.0
+    squeeze_flip_on_opposite: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.entry_strategy, str) or not self.entry_strategy:
@@ -61,14 +75,19 @@ class StrategyConfig:
             raise ValueError("exit_strategy must be a nonempty registered identifier")
         if self.entry_length == 0 and type(self.entry_length) is int:
             object.__setattr__(self, "entry_length",
-                               20 if self.entry_strategy == "turtle_s1" else 55)
+                               20 if self.entry_strategy in ("turtle_s1", "squeeze_momentum")
+                               else 55)
         if self.exit_length == 0 and type(self.exit_length) is int:
-            if self.entry_strategy not in ("turtle_s1", "turtle_s2"):
+            if self.entry_strategy not in ("turtle_s1", "turtle_s2", "squeeze_momentum"):
                 raise ValueError("alternate entry strategies require explicit exit_length")
             object.__setattr__(self, "exit_length",
                                10 if self.entry_strategy == "turtle_s1" else 20)
+        if (self.entry_strategy == "squeeze_momentum") != (self.exit_strategy == "atr_bracket"):
+            raise ValueError("squeeze_momentum entry requires atr_bracket exit and vice versa")
         for name in ("entry_length", "exit_length", "failsafe_length", "atr_length",
-                     "chandelier_length", "chandelier_atr_length"):
+                     "chandelier_length", "chandelier_atr_length", "squeeze_bb_length",
+                     "squeeze_kc_length", "squeeze_momentum_length", "squeeze_adx_length",
+                     "squeeze_adx_smoothing", "squeeze_wma_length", "squeeze_atr_length"):
             value = getattr(self, name)
             if type(value) is not int or not 2 <= value <= 10000:
                 raise ValueError(f"{name} must be an integer in 2..10000")
@@ -76,10 +95,20 @@ class StrategyConfig:
             1, 2, 3, 5, 6, 10, 15, 30,
         ):
             raise ValueError("interval_minutes must be a supported intraday interval")
-        for name in ("atr_multiple", "add_multiple", "chandelier_multiple"):
+        for name in ("atr_multiple", "add_multiple", "chandelier_multiple",
+                     "squeeze_bb_multiple", "squeeze_kc_multiple", "squeeze_target_multiple"):
             _positive(getattr(self, name), name)
+        try:
+            valid_threshold = (type(self.squeeze_adx_threshold) in (int, float)
+                               and isfinite(self.squeeze_adx_threshold)
+                               and self.squeeze_adx_threshold >= 0)
+        except OverflowError:
+            valid_threshold = False
+        if not valid_threshold:
+            raise ValueError("squeeze_adx_threshold must be finite and nonnegative")
         _decimal(self.tick_size, "tick_size", positive=True)
-        for name in ("allow_short", "chandelier_ratchet"):
+        for name in ("allow_short", "chandelier_ratchet", "squeeze_use_adx",
+                     "squeeze_use_wma", "squeeze_flip_on_opposite"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"{name} must be boolean")
         if self.chandelier_timeframe not in ("session", "intraday"):

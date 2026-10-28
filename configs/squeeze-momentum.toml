@@ -1,0 +1,34 @@
+# Corrected LazyBear calculations and video-confirmed ADX/WMA/ATR settings.
+# Independent cash-funded, long-only experiment; not exact video replication.
+schema_version = 2
+
+[strategy]
+entry_strategy = "squeeze_momentum"
+exit_strategy = "atr_bracket"
+interval_minutes = 30
+allow_short = false
+atr_multiple = 2.0
+squeeze_bb_length = 20
+squeeze_bb_multiple = 2.0
+squeeze_kc_length = 20
+squeeze_kc_multiple = 1.5
+squeeze_momentum_length = 20
+squeeze_adx_length = 14
+squeeze_adx_smoothing = 14
+squeeze_adx_threshold = 20.0
+squeeze_use_adx = true
+squeeze_wma_length = 120
+squeeze_use_wma = true
+squeeze_atr_length = 14
+squeeze_target_multiple = 3.0
+squeeze_flip_on_opposite = true
+
+[risk]
+starting_cash = "10000"
+# 1.5% capital per ATR gives 3% planned stop risk at 2 ATR, before cash caps/costs.
+unit_fraction = "0.015"
+max_units = 1
+
+[execution]
+market_hours = "regular"
+slippage_bps = "5"

@@ -13,6 +13,7 @@ from typing import Protocol
 from turtle_trader.chandelier import ChandelierExit
 from turtle_trader.domain import Bar, StrategyConfig
 from turtle_trader.indicators import WilderATR, true_range
+from turtle_trader.squeeze import SqueezeIndicator, SqueezeSignal
 
 
 @dataclass(frozen=True)
@@ -156,13 +157,59 @@ class ChandelierRule:
         self.long_stop = self.short_stop = None
 
 
+class SqueezeEntry:
+    """Completed-bar observations produce one-shot next-open market signals."""
+
+    def __init__(self, config: StrategyConfig) -> None:
+        self.indicator = SqueezeIndicator(config)
+        self.signal: SqueezeSignal | None = None
+
+    def observe_session(self, high: float, low: float, close: float) -> None:
+        pass
+
+    def triggers(self, previous_winner: bool) -> EntryTriggers:
+        return EntryTriggers()
+
+    def on_fill(self, direction: int, price: float, n: float) -> None:
+        pass
+
+    def on_exit(self) -> None:
+        pass
+
+
+class ATRBracketRule:
+    """The engine owns protective stops and favorable target crossings."""
+
+    def __init__(self, config: StrategyConfig) -> None:
+        self.multiple = config.squeeze_target_multiple
+        self.target: float | None = None
+
+    def observe_session(self, high: float, low: float, close: float) -> None:
+        pass
+
+    def observe_bar(self, bar: Bar) -> None:
+        pass
+
+    def levels(self) -> tuple[float | None, float | None]:
+        return None, None
+
+    def on_fill(self, direction: int, price: float, n: float) -> None:
+        if self.target is None:
+            self.target = price + direction * self.multiple * n
+
+    def on_exit(self) -> None:
+        self.target = None
+
+
 ENTRY_RULES: dict[str, Callable[[StrategyConfig], EntryRule]] = {
     "turtle_s1": TurtleEntry,
     "turtle_s2": TurtleEntry,
+    "squeeze_momentum": SqueezeEntry,
 }
 EXIT_RULES: dict[str, Callable[[StrategyConfig], ExitRule]] = {
     "turtle_channel": TurtleChannelExit,
     "chandelier": ChandelierRule,
+    "atr_bracket": ATRBracketRule,
 }
 
 
@@ -198,9 +245,25 @@ class Strategy:
 
     @property
     def n(self) -> float | None:
+        if isinstance(self.entry_rule, SqueezeEntry):
+            return self.entry_rule.indicator.atr
         return self._atr.value
 
+    @property
+    def close_signal(self) -> SqueezeSignal | None:
+        return self.entry_rule.signal if isinstance(self.entry_rule, SqueezeEntry) else None
+
+    def clear_signal(self) -> None:
+        if isinstance(self.entry_rule, SqueezeEntry):
+            self.entry_rule.signal = None
+
+    @property
+    def target(self) -> float | None:
+        return self.exit_rule.target if isinstance(self.exit_rule, ATRBracketRule) else None
+
     def update_session(self, high: float, low: float, close: float) -> None:
+        if isinstance(self.entry_rule, SqueezeEntry):
+            return
         self._atr.update(true_range(high, low, self.previous_close))
         self.previous_close = close
         self.entry_rule.observe_session(high, low, close)
@@ -213,13 +276,16 @@ class Strategy:
         return self.weekly_n
 
     def update_bar(self, bar: Bar) -> None:
+        if isinstance(self.entry_rule, SqueezeEntry):
+            self.entry_rule.signal = self.entry_rule.indicator.update(bar)
         self.exit_rule.observe_bar(bar)
 
     def levels(self) -> RuleLevels:
         triggers = self.entry_rule.triggers(self.last_winner)
         long_exit, short_exit = self.exit_rule.levels()
         return RuleLevels(triggers.long, triggers.short, triggers.failsafe_long,
-                          triggers.failsafe_short, long_exit, short_exit, self.weekly_n)
+                          triggers.failsafe_short, long_exit, short_exit,
+                          self.n if isinstance(self.entry_rule, SqueezeEntry) else self.weekly_n)
 
     def on_fill(self, direction: int, price: float, n: float) -> None:
         self.entry_rule.on_fill(direction, price, n)

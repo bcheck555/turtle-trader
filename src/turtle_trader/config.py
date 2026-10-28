@@ -25,6 +25,10 @@ class AppConfig:
             raise ValueError("configuration schema_version must be 2")
         if self.risk.position_sizing == "available_cash" and self.strategy.allow_short:
             raise ValueError("available_cash sizing requires long-only trading")
+        if self.strategy.entry_strategy == "squeeze_momentum" and (
+            self.risk.max_units != 1 or self.risk.position_sizing != "atr"
+        ):
+            raise ValueError("squeeze_momentum requires ATR sizing and max_units=1 (no pyramiding)")
         if self.strategy.allow_short and (
             not self.execution.shortable_symbols or self.execution.borrow_rate is None
         ):

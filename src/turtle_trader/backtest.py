@@ -144,6 +144,10 @@ class _Replay:
         self.trade_start, self.trade_end = trade_start, trade_end
         self.market_halts = False
 
+    @property
+    def squeeze(self) -> bool:
+        return self.strategy_config.entry_strategy == "squeeze_momentum"
+
     def trading_at(self, at: datetime) -> bool:
         return ((self.trade_start is None or at >= self.trade_start)
                 and (self.trade_end is None or at < self.trade_end))
@@ -242,7 +246,9 @@ class _Replay:
         lot = self.portfolio.lots.get(order.intent.unit_id)
         if order.intent.intent == "open" and lot:
             distance = decimal(self.strategy_config.atr_multiple) * campaign.n
-            lot.stop = lot.average_price - campaign.direction * distance
+            if not self.squeeze or first_fill:
+                lot.stop = (price if self.squeeze else lot.average_price) - (
+                    campaign.direction * distance)
             if first_fill:
                 for other in self.portfolio.lots.values():
                     if (other.campaign_id == campaign.id and other.unit_id != lot.unit_id
@@ -255,7 +261,8 @@ class _Replay:
                 campaign.last_fill = lot.average_price
         self.result.events.append(EngineEvent(
             bar.symbol, bar.time, order.intent.reason, campaign.direction, price,
-            campaign.n, campaign.id, order.intent.unit_id, known_at=bar.time))
+            campaign.n, campaign.id, order.intent.unit_id,
+            known_at=bar.time if opening else bar.time_close))
         return capacity - quantity
 
     def queue_exit(self, campaign: Campaign, bar: Bar, reason: str,
@@ -284,7 +291,17 @@ class _Replay:
         price = self.broker.price(reference, "buy" if direction == 1 else "sell")
         quantity = (self.weekly_shares.get(symbol, 0) if campaign is None else campaign.shares)
         if campaign is None:
-            if self.risk_config.position_sizing == "available_cash":
+            if self.squeeze:
+                quantity = unit_shares(self.sizing.capital, decimal(n or 0), self.risk_config)
+                # Intraday equity ATR risk often implies leverage. Squeeze uses
+                # the smaller whole-share risk budget and available cash budget.
+                budget = (self.portfolio.available_cash - self.reserved_cash()
+                          - self.config.fee_per_order)
+                factor = (Decimal(1) if direction == 1
+                          else self.config.initial_short_collateral - 1)
+                affordable = max(0, int(budget / (price * factor + self.config.fee_per_share)))
+                quantity = min(quantity, affordable)
+            elif self.risk_config.position_sizing == "available_cash":
                 budget = (self.portfolio.available_cash - self.reserved_cash()
                           - self.config.fee_per_order)
                 quantity = max(0, int(budget / (price + self.config.fee_per_share)))
@@ -340,7 +357,9 @@ class _Replay:
             values.append(levels.exit_long if campaign.direction == 1 else levels.exit_short)
             values.extend(float(p.stop) for p in self.portfolio.lots.values()
                           if p.symbol == symbol and p.stop is not None)
-            if campaign.last_fill is not None:
+            if self.squeeze:
+                values.append(strategy.target)
+            elif campaign.last_fill is not None:
                 values.append(float(campaign.last_fill + campaign.direction
                                     * decimal(self.strategy_config.add_multiple) * campaign.n))
         return sorted({decimal(v) for v in values if v is not None and v > 0})
@@ -379,6 +398,12 @@ class _Replay:
         levels = strategy.levels()
         campaign = self.campaigns.get(symbol)
         if campaign and phase != "open":
+            signal = strategy.close_signal
+            if (self.squeeze and opening and signal is not None
+                    and signal.known_at <= bar.time and self.trading_at(bar.time)
+                    and signal.direction != campaign.direction
+                    and self.strategy_config.squeeze_flip_on_opposite):
+                self.queue_exit(campaign, bar, "opposite_signal")
             exit_level = levels.exit_long if campaign.direction == 1 else levels.exit_short
             if exit_level is not None and campaign.direction * (price - decimal(exit_level)) <= 0:
                 self.queue_exit(campaign, bar, "strategy_exit")
@@ -386,6 +411,9 @@ class _Replay:
                 if (lot.symbol == symbol and lot.stop is not None
                         and lot.direction * (price - lot.stop) <= 0):
                     self.queue_exit(campaign, bar, "protective_stop", key)
+            if (self.squeeze and strategy.target is not None
+                    and campaign.direction * (price - decimal(strategy.target)) >= 0):
+                self.queue_exit(campaign, bar, "take_profit")
             reductions = self.pending(symbol, "reduce")
             if reductions:
                 actual_started = True
@@ -395,6 +423,18 @@ class _Replay:
                 actual_started = True
             self.cleanup(symbol)
         if phase == "reduce":
+            return capacity, actual_started, shadow_started
+        if self.squeeze:
+            # A close signal lives for exactly the following eligible candle.
+            # Never reuse it at an intrabar crossing or after a same-bar exit.
+            signal = strategy.close_signal
+            if opening and signal is not None:
+                strategy.clear_signal()
+                if (self.trading_at(bar.time) and signal.known_at <= bar.time
+                        and symbol not in self.campaigns and capacity > 0):
+                    capacity = self.open_unit(symbol, signal.direction, price, bar,
+                                              capacity, True)
+                    actual_started = True
             return capacity, actual_started, shadow_started
         if not self.trading_at(bar.time) or capacity <= 0:
             return capacity, actual_started, shadow_started
@@ -523,6 +563,10 @@ class _Replay:
         strategy = self.strategies[symbol]
         levels = strategy.levels()
         campaign = self.campaigns.get(symbol)
+        signal = strategy.close_signal
+        if (self.squeeze and signal is not None and signal.known_at <= bar.time
+                and self.trading_at(bar.time)):
+            return True
         if campaign:
             exit_level = levels.exit_long if campaign.direction == 1 else levels.exit_short
             adverse = bar.low if campaign.direction == 1 else bar.high
@@ -532,12 +576,17 @@ class _Replay:
                 if (lot.symbol == symbol and lot.stop is not None
                         and lot.direction * (decimal(adverse) - lot.stop) <= 0):
                     return True
-            if (campaign.last_fill is not None and not campaign.blocked_additions
+            if (not self.squeeze and campaign.last_fill is not None
+                    and not campaign.blocked_additions
                     and self.held_units(symbol) < self.risk_config.max_units):
                 threshold = (campaign.last_fill + campaign.direction
                              * decimal(self.strategy_config.add_multiple) * campaign.n)
                 favorable = bar.high if campaign.direction == 1 else bar.low
                 if campaign.direction * (decimal(favorable) - threshold) >= 0:
+                    return True
+            if self.squeeze and strategy.target is not None:
+                favorable = bar.high if campaign.direction == 1 else bar.low
+                if campaign.direction * (favorable - strategy.target) >= 0:
                     return True
         elif ((levels.entry_long is not None and bar.high >= levels.entry_long)
               or (levels.entry_short is not None and bar.low <= levels.entry_short)):
@@ -564,6 +613,18 @@ class _Replay:
             self.portfolio.marks[bar.symbol] = decimal(bar.open)
         self.sizing.observe(local_time(bars[0].time), self.portfolio.equity)
         for bar in bars:
+            if self.squeeze:
+                strategy = self.strategies[bar.symbol]
+                signal = strategy.close_signal
+                campaign = self.campaigns.get(bar.symbol)
+                if signal is not None and (
+                    not self.trading_at(bar.time) or signal.known_at > bar.time
+                    or (campaign is not None and (
+                        signal.direction == campaign.direction
+                        or not self.strategy_config.squeeze_flip_on_opposite))
+                ):
+                    strategy.clear_signal()
+                continue
             week = local_time(bar.time).isocalendar()[:2]
             if self.weeks.get(bar.symbol) != week:
                 self.weeks[bar.symbol] = week
@@ -602,7 +663,16 @@ class _Replay:
                 self.portfolio.marks[bar.symbol] = decimal(bar.close)
         for bar in bars:
             strategy = self.strategies[bar.symbol]
+            if self.squeeze:
+                for order in self.pending(bar.symbol, "open"):
+                    self.cancel(order, bar.time_close, "entry_bar_expired")
+                self.cleanup(bar.symbol)
             strategy.update_bar(bar)
+            signal = strategy.close_signal
+            if signal is not None:
+                self.result.events.append(EngineEvent(
+                    bar.symbol, signal.known_at, "close_signal", signal.direction,
+                    n=decimal(signal.atr), known_at=signal.known_at))
             key = (bar.symbol, local_time(bar.time).date())
             if bar.time_close == session_closes[key]:
                 strategy.update_session(*daily[key])
@@ -708,6 +778,10 @@ def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
     price_basis = validate_price_basis(price_basis)
     if risk_config.position_sizing == "available_cash" and strategy_config.allow_short:
         raise ValueError("available_cash sizing requires long-only trading")
+    if strategy_config.entry_strategy == "squeeze_momentum" and (
+        risk_config.max_units != 1 or risk_config.position_sizing != "atr"
+    ):
+        raise ValueError("squeeze_momentum requires ATR sizing and max_units=1 (no pyramiding)")
     for boundary in (trade_start, trade_end):
         if boundary is not None and boundary.utcoffset() is None:
             raise ValueError("trade boundaries must be timezone-aware")
@@ -762,6 +836,8 @@ def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
     result.price_basis = price_basis
     sizing_description = ("available-cash entry sizing"
                           if risk_config.position_sizing == "available_cash" else "weekly sizing")
+    if replay.squeeze:
+        sizing_description = "signal-bar ATR sizing capped by available cash; no pyramiding"
     result.research_warnings = research_warnings(price_basis) + [
         f"Equity adaptation: cash-funded longs, regular exchange sessions, {sizing_description}; "
         "OHLC paths and volume capacity are simulations, not tick execution."]
@@ -780,6 +856,11 @@ def run_backtest(bars: list[Bar], strategy_config: StrategyConfig,
     result.exit_strategy = strategy_config.exit_strategy
     result.strategy_settings = asdict(strategy_config)
     result.strategy_warnings = strategy_warnings(strategy_config.exit_strategy)
+    if replay.squeeze:
+        result.strategy_warnings.append(
+            "Independent corrected LazyBear implementation: completed-bar signals, next-open "
+            "entries, frozen signal ATR and first-fill brackets; not video-result replication. "
+            "Dual-target/trailing exits are not modeled.")
     return result
 
 
