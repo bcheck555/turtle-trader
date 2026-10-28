@@ -69,3 +69,39 @@ fee-inclusive flat-to-flat campaign statistics; open positions are marked but
 excluded from closed-trade win rates and profit factors. Adjusted historical
 equity data, OHLC execution ambiguity, cash constraints, and the chosen costs
 limit interpretation. Held-out rankings do not establish future profitability.
+
+## AAPL video comparison
+
+Download the earliest available regular-session AAPL SIP minute history with:
+
+```sh
+uv run python research/download_aapl_history.py --end 2026-10-26
+```
+
+The helper discovers the first actual regular-session bar and reads only the
+two Alpaca credential assignments from the repository `.env` when they are not
+already set in the environment. It never evaluates that file as shell code.
+Download dates follow the existing policy of excluding the current New York date.
+
+The first acquisition retained January 4, 2016 onward, including 59 unknown
+missing minute slots on February 2 and February 22. Targeted provider requests
+still returned no bars in those ranges. Preserve that raw archive. The following
+verified derivative starts after the last gap; it does not fabricate candles:
+
+```sh
+uv run python -m turtle_trader.archive \
+  runs/aapl-1m-20160104-20261026 runs/aapl-1m-20160223-20261026 \
+  --cutoff 2016-02-23
+uv run python -m research.run_aapl_squeeze \
+  --source-csv runs/aapl-1m-20160223-20261026/bars.csv \
+  --source-manifest runs/aapl-1m-20160223-20261026/manifest.toml \
+  --output-dir runs/squeeze-aapl-30m-repeat
+```
+
+This cutoff belongs to the recorded acquisition; inspect coverage before
+choosing a cutoff for any new dataset. The AAPL runner compares all available
+continuous history and both date ranges visible in the video, with explicit
+long/short, execution-cost, and legacy BB-width sensitivities. These are fixed
+comparison hypotheses, not a parameter optimization. The original modified
+script's final bug-toggle state and advanced trailing implementation remain
+unknown. See the [AAPL report](../research/aapl-squeeze-report.md) for results.
